@@ -79,6 +79,11 @@ uv run kama ping                      # exit 0 ok, 1 rpc error, 2 bad config, 3 
 uv run kama run "fix the failing test" # agent run in-process (S1); asks before bash/write_file
 uv run kama run -y -w ../other "..."  # auto-approve, different workspace
 make live                             # real-API tests (needs ANTHROPIC_API_KEY; costs money)
+
+uv run python -m evals.run_evals list      # eval tasks (docs/EVALS.md explains everything)
+make evals-selftest                        # graders vs oracle / null / wrong solutions; free
+uv run python -m evals.run_evals run --reps 3 [--variant v1] [--tasks a,b]   # paid
+uv run python -m evals.run_evals summary [--variant v1]
 ```
 
 Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the API key in
@@ -112,6 +117,10 @@ tests/fakes.py           ScriptedProvider: canned LLM responses, records request
 tests/unit/              protocol, config, server, tools, loop, provider (mock HTTP)
 tests/integration/       real daemon + CLI subprocesses
 tests/live/              real API; deselected by default
+evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
+evals/run_evals.py       CLI: list / selftest / run / summary; harness-approval gate
+evals/tasks/<id>/        task.toml (goal, tags) + fixture/ + check.py + oracle/ + wrong/*/
+evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/ git-ignored)
 ```
 
 ### Invariants (keep these true)
@@ -137,6 +146,13 @@ tests/live/              real API; deselected by default
   through `asyncio.to_thread`, because the loop moves into the daemon's event loop in S2.
 - Tool specs are sorted and the system prompt holds nothing volatile, which keeps the
   prompt-cache prefix stable.
+
+- Evals grade the end state of a fresh workspace with hidden checks, never the agent's
+  own claims. Every task has an `oracle/` that passes and at least one `wrong/` that
+  fails; `selftest` enforces it inside `make verify`.
+- Infra failures (API error, timeout, grader crash, wrong served model) go to
+  `errors.jsonl` and never count as a score. Only the user approves the harness hash
+  (`--approve-harness`); never pass it on their behalf.
 
 ### Conventions
 

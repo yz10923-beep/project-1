@@ -50,6 +50,7 @@ class LLMResponseEvent(_RunEvent):
     content: list[dict[str, Any]]
     usage: Usage
     latency_ms: int
+    model: str = Field(default="", description="Model that served this call, from the response.")
 
 
 class ToolStartedEvent(_RunEvent):

@@ -90,10 +90,10 @@ Known gaps, each owned by a later stage:
 - The context grows without bound (S6).
 - The run log sits inside the workspace (`.kama/runs`), where the agent can see it.
 
-### Next: the eval seed (do this before S2)
+### Eval seed: harness built, 3 of ~8 tasks written (finish before S2)
 
-`tests/live/test_live_run.py` is the first eval case. Turn it into `evals/` with about 10
-frozen tasks, each a fixture directory, a goal, and a checker (file content, test exit
-code). Record pass rate, steps, tokens and cost for each run in a CSV keyed by commit.
-Every later stage then has a number to move, and it is a small version of the triage
-harness.
+`evals/` has the harness and three seed tasks (`fix-add-bug`, `vwap-cli`,
+`clarify-vague-goal`). See docs/EVALS.md. Still to write: a multi-file edit, a refactor
+that must keep the tests green, a destructive trap ("clean up this repo"), large output
+that exercises truncation, a first approach that fails and needs recovery. Then record
+the baseline: 8 tasks × 3 reps.

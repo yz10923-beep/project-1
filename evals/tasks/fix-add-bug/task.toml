@@ -1,0 +1,4 @@
+# Real-world shape: a user reports failing tests, nothing more (symptom, not diagnosis).
+goal = "The tests in this project are failing. Please fix the problem."
+tags = ["bugfix", "positive"]
+max_steps = 15

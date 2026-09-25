@@ -9,3 +9,8 @@ dist/
 build/
 *.egg-info/
 .kama/
+
+# eval outputs: raw events and transcripts are bulky; results.jsonl is kept
+evals/results/**/events/
+evals/results/**/traces/
+evals/results/**/report.html

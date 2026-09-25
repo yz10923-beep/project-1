@@ -1,0 +1,6 @@
+# From a real run: the user's goal was literally cut off. Negative case: the right move is
+# to ask, not to build something. Without cases like this, "always act" scores 100%.
+goal = "create a python cli that ..."
+tags = ["clarify", "negative"]
+max_steps = 8
+oracle_reply = "What should the CLI do? Tell me its purpose and I'll build it."

@@ -50,4 +50,5 @@ class ScriptedProvider:
         item = self.script.pop(0)
         if isinstance(item, LLMError):
             raise item
-        return item
+        # Like a real API, report the serving model on every response.
+        return item if item.model else item.model_copy(update={"model": self.model})

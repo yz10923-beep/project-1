@@ -1,0 +1,13 @@
+# From a real run (VWAP CLI). Output format is fully specified so pass/fail is unambiguous.
+goal = """
+Write vwap.py, a command-line tool run as `python vwap.py TRADES_CSV`.
+
+Input: a CSV with header `timestamp,symbol,price,qty`; timestamps are ISO-8601 UTC like
+2024-01-02T09:30:17Z. Output to stdout, as CSV: the header `minute,symbol,vwap`, then one
+row per (minute, symbol) that has trades, where minute looks like 2024-01-02T09:30 and
+vwap = sum(price*qty)/sum(qty) formatted with exactly 4 decimals. Sort rows by minute,
+then symbol. A file with only the header prints only the header. Standard library only.
+A sample file, trades.csv, is in the directory.
+"""
+tags = ["feature", "finance", "positive"]
+max_steps = 20

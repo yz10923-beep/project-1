@@ -132,6 +132,7 @@ class AgentLoop:
                         content=resp.content,
                         usage=resp.usage,
                         latency_ms=_ms_since(t_llm),
+                        model=resp.model,
                     )
                 )
                 messages.append({"role": "assistant", "content": resp.content})
