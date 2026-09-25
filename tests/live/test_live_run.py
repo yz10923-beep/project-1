@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -11,9 +10,15 @@ from kama_claude.core.agent.runner import run_goal
 from kama_claude.core.config import load_settings
 from kama_claude.core.llm.types import ToolCall
 
+# Same resolution as `kama` itself: env vars, ./.env (repo root under `make live`), ~/.kama/.env.
+SETTINGS = load_settings()
+
 pytestmark = [
     pytest.mark.live,
-    pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY unset"),
+    pytest.mark.skipif(
+        SETTINGS.anthropic_api_key is None,
+        reason="no ANTHROPIC_API_KEY in env, ./.env or ~/.kama/.env",
+    ),
 ]
 
 
@@ -29,7 +34,7 @@ async def test_agent_fixes_a_bug_and_verifies(tmp_path: Path) -> None:
     result, run_dir = await run_goal(
         "The test in test_calc.py fails. Fix calc.py and confirm with "
         "`python -m pytest -q` (or plain python if pytest is missing).",
-        settings=load_settings(dotenv_path=None),
+        settings=SETTINGS,
         workspace=tmp_path,
         approver=allow,
     )

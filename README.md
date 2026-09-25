@@ -12,7 +12,7 @@ uv run kama-core &          # listens on 127.0.0.1:7437
 uv run kama ping            # pong server=0.0.1 uptime=1491ms latency=0.6ms
 make verify                 # lint + mypy --strict + tests
 
-echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env
+mkdir -p ~/.kama && echo 'ANTHROPIC_API_KEY=sk-ant-...' > ~/.kama/.env && chmod 600 ~/.kama/.env
 uv run kama run "add a --verbose flag to cli.py and test it"   # asks before bash/write_file
 cat .kama/runs/*/events.jsonl | jq -c '{seq, type, stop_reason, name}'
 ```

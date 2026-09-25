@@ -1,4 +1,8 @@
-"""Settings. Priority (low -> high): built-in defaults -> .env -> process env vars.
+"""Settings. Priority (low -> high): built-in defaults -> ~/.kama/.env -> ./.env ->
+process env vars.
+
+~/.kama/.env is the home for secrets like the API key, so `kama` finds them from any
+workspace directory. ./.env (current directory) overrides it per project.
 
 A config file (~/.kama/config.toml) is deliberately deferred until a setting
 needs it; env vars are enough for one daemon on one machine.
@@ -58,13 +62,39 @@ def _from_env(env: Mapping[str, str | None]) -> dict[str, str]:
     return out
 
 
+def default_dotenv_paths() -> list[Path]:
+    """Lowest priority first."""
+    return [Path.home() / ".kama" / ".env", Path(".env")]
+
+
+def _read_dotenv(path: Path) -> dict[str, str]:
+    try:
+        return _from_env(dotenv_values(path, encoding="utf-8-sig"))  # -sig: tolerate a BOM
+    except UnicodeDecodeError as e:
+        # Typically `echo ... > .env` in Windows PowerShell 5.1, which writes UTF-16.
+        raise ConfigError(f"{path} is not UTF-8 text; re-save it as UTF-8") from e
+
+
 def load_settings(
-    env: Mapping[str, str] | None = None, dotenv_path: Path | None = Path(".env")
+    env: Mapping[str, str] | None = None,
+    dotenv_path: Path | list[Path] | None = None,
+    *,
+    use_default_dotenv: bool = True,
 ) -> Settings:
-    """Merge .env and environment variables over defaults. Raises ConfigError on bad values."""
+    """Merge .env files and environment variables over defaults.
+
+    `dotenv_path` replaces the default .env locations (tests pass explicit files);
+    `use_default_dotenv=False` with no path reads no .env at all.
+    Raises ConfigError on unreadable files or invalid values.
+    """
+    if dotenv_path is None:
+        paths = default_dotenv_paths() if use_default_dotenv else []
+    else:
+        paths = dotenv_path if isinstance(dotenv_path, list) else [dotenv_path]
     merged: dict[str, str] = {}
-    if dotenv_path is not None and dotenv_path.is_file():
-        merged |= _from_env(dotenv_values(dotenv_path))
+    for path in paths:
+        if path.is_file():
+            merged |= _read_dotenv(path)
     merged |= _from_env(os.environ if env is None else env)
     try:
         return Settings.model_validate(merged)

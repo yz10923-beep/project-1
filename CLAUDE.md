@@ -81,7 +81,8 @@ uv run kama run -y -w ../other "..."  # auto-approve, different workspace
 make live                             # real-API tests (needs ANTHROPIC_API_KEY; costs money)
 ```
 
-Agent settings (env or `.env`): `ANTHROPIC_API_KEY`, `KAMA_MODEL` (default `claude-opus-5`),
+Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the API key in
+`~/.kama/.env` so it works from any workspace): `ANTHROPIC_API_KEY`, `KAMA_MODEL` (default `claude-opus-5`),
 `KAMA_MAX_STEPS` (30), `KAMA_MAX_TOKENS` (16000), `KAMA_EFFORT` (unset = API default),
 `KAMA_REFUSAL_FALLBACK` (true; only sent for models that support it), `KAMA_RUNS_DIR` (`.kama/runs`).
 
@@ -96,7 +97,7 @@ src/kama_claude/
     transport/framing.py NDJSON read/write, 1 MiB frame cap
     transport/server.py  JsonRpcServer: register(method, ParamsModel, handler)
     transport/client.py  JsonRpcClient: call(method, params, ResultModel)
-    config.py            defaults -> .env -> KAMA_* env vars (pydantic-validated)
+    config.py            defaults -> ~/.kama/.env -> ./.env -> env vars (pydantic-validated)
     app.py               CoreApp: wires handlers, signal handling, lifecycle
     llm/types.py         LLMProvider protocol, LLMResponse (raw blocks + parsed views), Usage
     llm/anthropic_provider.py  Messages API via raw SDK; error mapping; caching; fallbacks
