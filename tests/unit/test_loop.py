@@ -219,3 +219,25 @@ async def test_unexpected_provider_exception_still_finishes_run(tmp_path: Path) 
     r = await loop.run("go", "r1")
     assert r.status == "error" and "KeyError" in (r.error or "")
     assert sink.types() == ["run.started", "run.finished"]
+
+
+async def test_approval_wait_is_timed_separately_from_execution(tmp_path: Path) -> None:
+    async def slow_yes(_: ToolCall) -> bool:
+        await asyncio.sleep(0.3)
+        return True
+
+    p = ScriptedProvider(
+        [
+            tool_response(
+                ("w", "write_file", {"path": "f.txt", "content": "x"}),
+                ("l", "list_dir", {}),
+            ),
+            text_response("ok"),
+        ]
+    )
+    loop, sink = make_loop(p, tmp_path, approver=slow_yes)
+    await loop.run("go", "r1")
+    write, ls = [e for e in sink.events if e.type == "tool.finished"]
+    assert write.approval_ms >= 250  # type: ignore[union-attr]
+    assert write.duration_ms < 250  # type: ignore[union-attr]  # execution only
+    assert ls.approval_ms == 0  # type: ignore[union-attr]  # read-only: never asked

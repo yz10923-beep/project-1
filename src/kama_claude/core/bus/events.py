@@ -68,7 +68,8 @@ class ToolFinishedEvent(_RunEvent):
     is_error: bool
     denied: bool = False
     output: str
-    duration_ms: int
+    duration_ms: int = Field(description="Tool execution time only; 0 if denied.")
+    approval_ms: int = Field(default=0, description="Time spent waiting for the user.")
 
 
 RunStatus = Literal["completed", "max_steps", "truncated", "refused", "error", "cancelled"]

@@ -177,14 +177,22 @@ class AgentLoop:
                 input=call.input,
             )
         )
-        t0 = time.monotonic()
+        # Human wait and tool execution are timed separately: mixing them makes tool
+        # latency and trajectory-efficiency numbers meaningless.
+        approval_ms = 0
+        duration_ms = 0
         denied = False
         tool = self._registry.get(call.name)
-        if tool is not None and tool.requires_approval and not await self._approver(call):
-            denied = True
+        if tool is not None and tool.requires_approval:
+            t_wait = time.monotonic()
+            denied = not await self._approver(call)
+            approval_ms = _ms_since(t_wait)
+        if denied:
             result = ToolResult(DENIED_MESSAGE, is_error=True)
         else:
+            t_exec = time.monotonic()
             result = await self._registry.execute(call.name, call.input, self._ctx)
+            duration_ms = _ms_since(t_exec)
         await self._sink.emit(
             ToolFinishedEvent(
                 **self._meta(run_id),
@@ -194,7 +202,8 @@ class AgentLoop:
                 is_error=result.is_error,
                 denied=denied,
                 output=result.content,
-                duration_ms=_ms_since(t0),
+                duration_ms=duration_ms,
+                approval_ms=approval_ms,
             )
         )
         block: dict[str, Any] = {

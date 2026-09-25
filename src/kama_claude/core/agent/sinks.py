@@ -70,7 +70,10 @@ class ConsolePrinter:
                 self._p(f"  → {event.name} {_one_line(json.dumps(event.input), 160)}")
             case ToolFinishedEvent():
                 mark = "denied" if event.denied else ("error" if event.is_error else "ok")
-                self._p(f"  ← {mark} · {event.duration_ms}ms · {_one_line(event.output, 160)}")
+                wait = f" (waited {event.approval_ms / 1000:.1f}s)" if event.approval_ms else ""
+                self._p(
+                    f"  ← {mark} · {event.duration_ms}ms{wait} · {_one_line(event.output, 160)}"
+                )
             case RunFinishedEvent():
                 u = event.usage
                 self._p(
