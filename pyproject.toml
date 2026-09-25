@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kama-claude"
+version = "0.0.1"
+description = "A minimal local coding-agent runtime: daemon + CLI over JSON-RPC/NDJSON."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+kama = "kama_claude.cli.main:main"
+kama-core = "kama_claude.core.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kama_claude"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
