@@ -33,3 +33,35 @@ def test_unrelated_env_vars_are_ignored() -> None:
 def test_bad_port_is_a_config_error(port: str) -> None:
     with pytest.raises(ConfigError):
         load_settings(env={"KAMA_PORT": port}, dotenv_path=None)
+
+
+def test_agent_defaults_and_overrides() -> None:
+    s = load_settings(env={}, dotenv_path=None)
+    assert (s.model, s.max_steps, s.effort, s.refusal_fallback) == ("claude-opus-5", 30, None, True)
+    s = load_settings(
+        env={
+            "KAMA_MODEL": "claude-sonnet-5",
+            "KAMA_EFFORT": "low",
+            "KAMA_REFUSAL_FALLBACK": "false",
+        },
+        dotenv_path=None,
+    )
+    assert (s.model, s.effort, s.refusal_fallback) == ("claude-sonnet-5", "low", False)
+
+
+def test_api_key_read_from_dotenv_and_hidden_in_repr(tmp_path: Path) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("ANTHROPIC_API_KEY=sk-test-123\n")
+    s = load_settings(env={}, dotenv_path=dotenv)
+    assert s.anthropic_api_key is not None
+    assert s.anthropic_api_key.get_secret_value() == "sk-test-123"
+    assert "sk-test-123" not in repr(s)
+
+
+def test_empty_values_fall_back_to_defaults() -> None:
+    assert load_settings(env={"KAMA_EFFORT": ""}, dotenv_path=None).effort is None
+
+
+def test_bad_effort_is_a_config_error() -> None:
+    with pytest.raises(ConfigError):
+        load_settings(env={"KAMA_EFFORT": "extreme"}, dotenv_path=None)

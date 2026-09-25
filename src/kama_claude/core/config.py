@@ -12,17 +12,29 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 ENV_PREFIX = "KAMA_"
+# Read from .env too, so the key can live there instead of the shell profile.
+_UNPREFIXED = {"ANTHROPIC_API_KEY": "anthropic_api_key"}
 
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # daemon
     host: str = "127.0.0.1"
     port: int = Field(default=7437, ge=0, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    # agent
+    model: str = "claude-opus-5"
+    max_tokens: int = Field(default=16_000, ge=1)
+    max_steps: int = Field(default=30, ge=1)
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    refusal_fallback: bool = True
+    runs_dir: Path = Path(".kama/runs")
+    anthropic_api_key: SecretStr | None = None
 
 
 class ConfigError(Exception):
@@ -33,10 +45,15 @@ def _from_env(env: Mapping[str, str | None]) -> dict[str, str]:
     fields = Settings.model_fields
     out: dict[str, str] = {}
     for key, value in env.items():
-        if not key.startswith(ENV_PREFIX) or value is None:
+        if not value:  # unset and empty both mean "use the default"
+            continue
+        if key in _UNPREFIXED:
+            out[_UNPREFIXED[key]] = value
+            continue
+        if not key.startswith(ENV_PREFIX):
             continue
         name = key.removeprefix(ENV_PREFIX).lower()
-        if name in fields:
+        if name in fields and name != "anthropic_api_key":
             out[name] = value.upper() if name == "log_level" else value
     return out
 

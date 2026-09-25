@@ -1,4 +1,4 @@
-.PHONY: sync lint type test verify
+.PHONY: sync lint type test verify live
 
 sync:
 	uv sync
@@ -14,3 +14,6 @@ test:
 	uv run pytest -v
 
 verify: lint type test
+
+live:
+	uv run pytest -m live -v tests/live

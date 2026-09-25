@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S0 done → S1 next**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S1 done → S2 next**.
 
 ### Commands
 
@@ -76,7 +76,14 @@ uv run pytest tests/unit/test_server.py::test_ping_roundtrip -v
 uv run kama-core                      # daemon, foreground; Ctrl+C / SIGTERM to stop
 KAMA_PORT=8000 uv run kama-core       # config via KAMA_* env vars or .env
 uv run kama ping                      # exit 0 ok, 1 rpc error, 2 bad config, 3 daemon unreachable
+uv run kama run "fix the failing test" # agent run in-process (S1); asks before bash/write_file
+uv run kama run -y -w ../other "..."  # auto-approve, different workspace
+make live                             # real-API tests (needs ANTHROPIC_API_KEY; costs money)
 ```
+
+Agent settings (env or `.env`): `ANTHROPIC_API_KEY`, `KAMA_MODEL` (default `claude-opus-5`),
+`KAMA_MAX_STEPS` (30), `KAMA_MAX_TOKENS` (16000), `KAMA_EFFORT` (unset = API default),
+`KAMA_REFUSAL_FALLBACK` (true; only sent for models that support it), `KAMA_RUNS_DIR` (`.kama/runs`).
 
 ### Layout
 
@@ -91,9 +98,19 @@ src/kama_claude/
     transport/client.py  JsonRpcClient: call(method, params, ResultModel)
     config.py            defaults -> .env -> KAMA_* env vars (pydantic-validated)
     app.py               CoreApp: wires handlers, signal handling, lifecycle
+    llm/types.py         LLMProvider protocol, LLMResponse (raw blocks + parsed views), Usage
+    llm/anthropic_provider.py  Messages API via raw SDK; error mapping; caching; fallbacks
+    tools/base.py        Tool[Params] ABC, ToolResult, workspace path confinement
+    tools/registry.py    validate input -> run -> every failure becomes an is_error result
+    tools/builtin.py     read_file, list_dir, write_file, bash
+    agent/loop.py        AgentLoop: model -> tools -> results -> repeat; emits run events
+    agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
+    agent/runner.py      run_goal(): run id, run dir, provider, registry, sinks
   cli/main.py            argparse CLI; maps failures to exit codes
-tests/unit/              protocol, config, in-process server
+tests/fakes.py           ScriptedProvider: canned LLM responses, records requests
+tests/unit/              protocol, config, server, tools, loop, provider (mock HTTP)
 tests/integration/       real daemon + CLI subprocesses
+tests/live/              real API; deselected by default
 ```
 
 ### Invariants (keep these true)
@@ -107,6 +124,18 @@ tests/integration/       real daemon + CLI subprocesses
   readiness signal tests wait for.
 - Adding a command = params + result model in `bus/commands.py`, handler registered in
   `CoreApp.__init__`, a client call, and unit + integration tests.
+- Agent history is append-only; assistant content blocks are echoed back verbatim
+  (thinking signatures, fallback blocks). Never edit or re-serialize earlier turns.
+- Each `tool_use` gets exactly one `tool_result`, same order, all in one user message.
+- Every run writes `run.started` first and `run.finished` last, even on API errors,
+  internal bugs and cancellation. `events.jsonl` alone must be enough to reconstruct a run.
+- Tool failures (bad input, missing file, denied, crash) go back to the model as
+  `is_error` results and never raise out of the registry. A non-zero `bash` exit code
+  is a normal result, not an error.
+- File tools cannot leave the workspace (symlinks included). Blocking I/O in tools goes
+  through `asyncio.to_thread`, because the loop moves into the daemon's event loop in S2.
+- Tool specs are sorted and the system prompt holds nothing volatile, which keeps the
+  prompt-cache prefix stable.
 
 ### Conventions
 
@@ -114,6 +143,8 @@ tests/integration/       real daemon + CLI subprocesses
 - Comments/docstrings in English, short, and only where the *why* isn't obvious.
 - Tests use real sockets on port 0 and real subprocesses rather than mocking the transport.
   Wait on a readiness signal, never a fixed sleep.
+- Agent-loop tests use `tests/fakes.py::ScriptedProvider`; provider tests mock HTTP with
+  `httpx2.MockTransport` (the anthropic 1.x SDK is built on httpx2, not httpx).
 - LLM calls (S1+) go through the raw provider SDK behind our own `LLMProvider` interface;
   no agent frameworks in this repo.
 - Secrets live in `.env` (git-ignored); never commit keys.

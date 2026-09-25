@@ -8,6 +8,7 @@ version = "0.0.1"
 description = "A minimal local coding-agent runtime: daemon + CLI over JSON-RPC/NDJSON."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "anthropic>=0.60",
     "pydantic>=2.7",
     "python-dotenv>=1.0",
 ]
@@ -35,6 +36,10 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
+[tool.ruff.lint.per-file-ignores]
+# Blocking filesystem checks in async tests are fine: nothing else runs on that loop.
+"tests/**/*.py" = ["ASYNC240"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
@@ -45,3 +50,5 @@ explicit_package_bases = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+addopts = "-m 'not live'"
+markers = ["live: calls the real LLM API (costs money); run with `make live`"]
