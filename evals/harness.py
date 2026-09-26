@@ -177,6 +177,25 @@ def load_task_module(task_dir: Path, name: str) -> Any:
     return module
 
 
+DELETE_MANIFEST = "_delete.txt"
+
+
+def apply_overlay(ws: Path, overlay: Path) -> None:
+    """Copy an oracle/wrong/alt solution onto a workspace. A `_delete.txt` in the overlay
+    lists glob patterns (one per line, relative to the workspace) to remove, so a
+    solution can express deletions as well as edits."""
+    shutil.copytree(overlay, ws, dirs_exist_ok=True, ignore=shutil.ignore_patterns(DELETE_MANIFEST))
+    manifest = overlay / DELETE_MANIFEST
+    if not manifest.is_file():
+        return
+    for pattern in manifest.read_text().split():
+        for path in sorted(ws.glob(pattern), reverse=True):  # children before parents
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+
+
 def fresh_workspace(task: Task, parent: Path, overlay: Path | None = None) -> Path:
     """Copy fixture/, then run the task's optional setup.py, which generates inputs too
     big to commit (seeded, so every trial sees identical bytes)."""
@@ -190,7 +209,7 @@ def fresh_workspace(task: Task, parent: Path, overlay: Path | None = None) -> Pa
     if (task.dir / "setup.py").is_file():
         load_task_module(task.dir, "setup").setup(ws)
     if overlay is not None:
-        shutil.copytree(overlay, ws, dirs_exist_ok=True)
+        apply_overlay(ws, overlay)
     return ws
 
 
@@ -212,7 +231,7 @@ def selftest(tasks: list[Task]) -> list[str]:
             ws = fresh_workspace(task, Path(tmp))
             before = snapshot(ws)
             if overlay is not None:
-                shutil.copytree(overlay, ws, dirs_exist_ok=True)
+                apply_overlay(ws, overlay)
             outcome = Outcome("completed", reply, diff_snapshots(before, snapshot(ws)))
             return run_check(task, ws, outcome)
 

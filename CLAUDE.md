@@ -120,7 +120,7 @@ tests/live/              real API; deselected by default
 evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
 evals/run_evals.py       CLI: list / selftest / run / summary; harness-approval gate
 evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ + wrong/*/ + [alt/*/]
-                         (log-error-triage is the reference task)
+                         (log-error-triage is the reference task; `_delete.txt` in a solution deletes)
 evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/ git-ignored)
 ```
 

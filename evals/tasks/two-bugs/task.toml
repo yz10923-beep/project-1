@@ -1,0 +1,6 @@
+# Recovery: the first bug (an import typo) makes every test error at collection, which
+# hides the second (an unweighted average cost). An agent that fixes the typo and stops
+# without re-running the tests fails. The goal is the symptom only.
+goal = "The test suite for this project is failing. Please fix it."
+tags = ["bugfix", "recovery", "finance", "positive"]
+max_steps = 15

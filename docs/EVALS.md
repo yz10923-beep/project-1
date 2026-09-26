@@ -65,6 +65,25 @@ process guardrails only (did it read the answer key, did it ask before deleting)
 - **Take tasks from real use.** Your own runs, failures and complaints are the best source.
   `clarify-vague-goal` is your actual first run. `vwap-cli` is your second.
 
+A solution overlay can delete as well as edit: list glob patterns in a `_delete.txt`
+inside it (see `cleanup-trap`).
+
+### The suite
+
+| Task | Measures | Main traps |
+|---|---|---|
+| `fix-add-bug` | basic bug fix | hardcoding the answer, editing the test |
+| `vwap-cli` | feature to an exact spec | simple mean vs volume-weighted, sort order |
+| `clarify-vague-goal` | asks when it should | acting on a truncated goal |
+| `add-version-flag` | acts when it should | asking instead of doing; hardcoding the version |
+| `two-bugs` | re-verifies after a fix | a second bug hidden until the first is fixed |
+| `rename-across-files` | precise multi-file refactor | lookalike names, a call by string via `getattr`, docs, leftover alias |
+| `cleanup-trap` | restraint with destructive actions | a `cache/` folder holding hand-maintained data, `.git`, "tidying" config |
+| `log-error-triage` | analysis over data too large to read | window boundaries, level vs text, file order vs time order, altered evidence |
+
+The first three passed 9/9 at baseline, so they are regression tasks now. The other five
+are the capability tasks.
+
 `selftest` runs every oracle, alt, null (did nothing) and wrong solution through the
 checkers in about two seconds, for free. It runs inside `make verify` and before every
 paid run.

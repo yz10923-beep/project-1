@@ -1,0 +1,12 @@
+# Refactor precision. Traps: lookalike names that must survive (inv_conv_rate,
+# conv_rate_cache), a call made by *string* through getattr (missed by AST-only renames,
+# caught by grep), tests and docs that must follow, and no leftover alias. Answers are
+# derived by make_answers.py.
+goal = """
+Rename the function `conv_rate` in pricing/fx.py to `fx_rate` everywhere it is used:
+code, tests and docs. Don't leave an alias behind. Other teams import `inv_conv_rate`,
+`conv_rate_cache` and `CONV_RATE_TTL` from pricing.fx, so those names must not change.
+Behavior must stay the same.
+"""
+tags = ["refactor", "multi-file", "positive"]
+max_steps = 20
