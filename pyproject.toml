@@ -30,6 +30,13 @@ dev = [
 
 [tool.ruff]
 src = ["src"]
+# Task fixtures and solutions are sample code for the agent, some of it wrong on purpose.
+extend-exclude = [
+    "evals/tasks/*/fixture",
+    "evals/tasks/*/oracle",
+    "evals/tasks/*/wrong",
+    "evals/tasks/*/alt",
+]
 line-length = 100
 target-version = "py312"
 

@@ -1,0 +1,7 @@
+# Both directions: the counterpart of clarify-vague-goal. Slightly underspecified (format
+# of the output isn't given), but any engineer would just do it, so asking instead of
+# acting fails. Hidden trap: hardcoding "1.4.2" instead of reading riskcalc.__version__
+# (the checker bumps the version and expects the flag to follow).
+goal = "Add a --version flag to cli.py that prints the package version."
+tags = ["feature", "act-dont-ask", "positive"]
+max_steps = 12

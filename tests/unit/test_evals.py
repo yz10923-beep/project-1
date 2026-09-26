@@ -136,3 +136,29 @@ async def test_summary_reports_rates_and_errors(tmp_path: Path) -> None:
     assert "2/3 trials passed" in text
     assert "pass@k (any rep passed): 1/1" in text and "pass^k (every rep passed): 0/1" in text
     assert "| fix-add-bug |" in text
+
+
+# If this changes, the log the agent sees changed, and scores from before and after are
+# not comparable. Update it deliberately: re-run make_answers.py, selftest, re-approve.
+LOG_TRIAGE_SHA = "2bd5a9882a9e0a716948a8b984418cc33b2717b602ec797d7695fe1c65ac52b5"
+
+
+def test_log_triage_fixture_is_frozen() -> None:
+    from evals.harness import TASKS_DIR, load_task_module
+
+    setup = load_task_module(TASKS_DIR / "log-error-triage", "setup")
+    assert setup.log_sha256() == LOG_TRIAGE_SHA
+
+
+async def test_setup_hook_generates_inputs_for_each_trial(tmp_path: Path) -> None:
+    answer = json.loads((Path("evals/tasks/log-error-triage/oracle/answer.json")).read_text())
+    script: list[LLMResponse | LLMError] = [
+        tool_response(("g", "bash", {"command": "grep -c 'level=ERROR' logs/app.log"})),
+        tool_response(("w", "write_file", {"path": "answer.json", "content": json.dumps(answer)})),
+        text_response("Done."),
+    ]
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(list(script)))
+    await run_suite(load_tasks(["log-error-triage"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 1.0, row["explanation"]
+    assert row["meta"]["changed"] == {"answer.json": "added"}  # generated log is not a change

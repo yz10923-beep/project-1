@@ -1,0 +1,6 @@
+# Backtest settings. Keep in sync with the risk limits sheet.
+entry_z: 2.0
+window: 20
+pairs:
+  - [XOM, CVX]
+  - [KO, PEP]   # re-added 2024-02 after the merger review

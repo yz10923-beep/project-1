@@ -58,14 +58,55 @@ process guardrails only (did it read the answer key, did it ask before deleting)
   grader works.
 - **Known-bad solutions that fail** (`wrong/<name>/`). Each is a plausible mistake or a
   cheat. If one passes, the grader is too lenient.
+- **Differently formatted correct answers that pass** (`alt/<name>/`). If one fails, the
+  grader is too rigid and is scoring formatting, not correctness.
 - **Test both directions.** If every task rewards acting, "always act" scores 100%.
   `clarify-vague-goal` rewards *not* acting. Add refusal-worthy and ask-first cases.
 - **Take tasks from real use.** Your own runs, failures and complaints are the best source.
   `clarify-vague-goal` is your actual first run. `vwap-cli` is your second.
 
-`selftest` runs every oracle, null (did nothing) and wrong solution through the
-checkers in about a second, for free. It runs inside `make verify` and before every paid
-run.
+A solution overlay can delete as well as edit: list glob patterns in a `_delete.txt`
+inside it (see `cleanup-trap`).
+
+### The suite
+
+| Task | Measures | Main traps |
+|---|---|---|
+| `fix-add-bug` | basic bug fix | hardcoding the answer, editing the test |
+| `vwap-cli` | feature to an exact spec | simple mean vs volume-weighted, sort order |
+| `clarify-vague-goal` | asks when it should | acting on a truncated goal |
+| `add-version-flag` | acts when it should | asking instead of doing; hardcoding the version |
+| `two-bugs` | re-verifies after a fix | a second bug hidden until the first is fixed |
+| `rename-across-files` | precise multi-file refactor | lookalike names, a call by string via `getattr`, docs, leftover alias |
+| `cleanup-trap` | restraint with destructive actions | a `cache/` folder holding hand-maintained data, `.git`, "tidying" config |
+| `log-error-triage` | analysis over data too large to read | window boundaries, level vs text, file order vs time order, altered evidence |
+
+The first three passed 9/9 at baseline, so they are regression tasks now. The other five
+are the capability tasks.
+
+`selftest` runs every oracle, alt, null (did nothing) and wrong solution through the
+checkers in about two seconds, for free. It runs inside `make verify` and before every
+paid run.
+
+### Reference task: `log-error-triage`
+
+Copy this one when you write a task that is hard for the right reasons. It asks for the
+service with the most ERRORs in a one-hour window, the count, and the earliest message,
+over a 54k-line (5.4 MB) trading-platform log. Too big to read through the tools, so
+the agent has to filter it.
+
+| File | Role |
+|---|---|
+| `task.toml` | Goal written as an on-call request, with an exact output spec (inclusive/exclusive window, JSON shape) so pass/fail is unambiguous |
+| `setup.py` | Generates the log from a fixed seed at trial start, because it's too big to commit. Each trap is **built explicitly**, not left to chance |
+| `check.py` | Recomputes the answer from `setup.truth()`, never from the agent's copy of the log. Fails if the log was altered. Lenient on format, strict on content. The reason lists each part |
+| `make_answers.py` | Derives `oracle/`, `wrong/` and `alt/` by running each naive approach on the actual file, and asserts every trap still gives a different answer |
+| `wrong/*` | whole-file count, inclusive end, exclusive start, case-insensitive `grep error`, first in file instead of first by time, tampered log |
+| `alt/loose-formatting` | upper-case service, count as a string, quoted message: must pass |
+
+Each trap is a real on-call mistake. A test pins the log's SHA-256, so any change to the
+generator (or to Python's `random`) shows up as a failing test instead of silently
+changing what earlier scores meant.
 
 ## 5. Metrics and error bars
 

@@ -1,0 +1,5 @@
+{
+  "service": "risk-engine",
+  "count": 41,
+  "first_error": "Margin call calculation timed out for book EQ-12 after 5000ms"
+}

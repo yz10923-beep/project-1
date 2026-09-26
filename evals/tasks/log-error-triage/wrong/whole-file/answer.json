@@ -1,0 +1,5 @@
+{
+  "service": "market-data",
+  "count": 130,
+  "first_error": "Feed handler lost multicast group 239.1.1.25; reconnecting"
+}
