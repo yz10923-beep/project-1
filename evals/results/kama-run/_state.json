@@ -1,0 +1,35 @@
+{
+  "metrics": [
+    {
+      "id": "passed",
+      "label": "passed",
+      "kind": "binary"
+    },
+    {
+      "id": "refused",
+      "label": "refused",
+      "kind": "binary",
+      "better": "lower"
+    }
+  ],
+  "perf_fields": [
+    {
+      "id": "steps",
+      "label": "steps"
+    },
+    {
+      "id": "tool_errors",
+      "label": "tool errors"
+    },
+    {
+      "id": "latency_s",
+      "label": "LLM time",
+      "unit": "s"
+    },
+    {
+      "id": "wall_s",
+      "label": "wall",
+      "unit": "s"
+    }
+  ]
+}
