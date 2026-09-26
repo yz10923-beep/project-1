@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, get_args
 
 import anthropic
@@ -14,11 +15,20 @@ from kama_claude.core.llm.types import LLMError, LLMResponse, Message, StopReaso
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 _FALLBACK_MODELS = ("claude-opus-5", "claude-fable-5-1")
 
+# Models that reject `output_config.effort` with a 400.
+_NO_EFFORT_MODELS = ("claude-haiku-4-5", "claude-sonnet-4-5")
+
 _KNOWN_STOP_REASONS = set(get_args(StopReason))
+
+logger = logging.getLogger(__name__)
 
 
 def supports_refusal_fallback(model: str) -> bool:
     return model.startswith(_FALLBACK_MODELS)
+
+
+def supports_effort(model: str) -> bool:
+    return not model.startswith(_NO_EFFORT_MODELS)
 
 
 def to_llm_response(msg: BetaMessage) -> LLMResponse:
@@ -51,6 +61,10 @@ class AnthropicProvider:
     ) -> None:
         self._model = model
         self._max_tokens = max_tokens
+        if effort and not supports_effort(model):
+            # Dropped rather than sent: the API would reject every request with a 400.
+            logger.warning("model %s does not support effort; ignoring effort=%s", model, effort)
+            effort = None
         self._effort = effort
         self._fallback = refusal_fallback and supports_refusal_fallback(model)
         # With no api_key the SDK resolves credentials itself (env var, `ant auth` profile, ...).
@@ -59,6 +73,11 @@ class AnthropicProvider:
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def effort(self) -> str | None:
+        """The effort actually sent (None if unset or unsupported by the model)."""
+        return self._effort
 
     def build_request(
         self, *, system: str, messages: list[Message], tools: list[ToolSpec]

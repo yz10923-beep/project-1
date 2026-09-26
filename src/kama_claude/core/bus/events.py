@@ -84,6 +84,7 @@ class RunFinishedEvent(_RunEvent):
     usage: Usage
     duration_ms: int
     error: str | None = None
+    retryable: bool | None = None
 
 
 Event = Annotated[

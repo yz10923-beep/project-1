@@ -16,6 +16,7 @@ from evals.harness import (
     APPROVAL_FILE,
     RESULTS_DIR,
     RunConfig,
+    SuiteAborted,
     harness_sha,
     load_tasks,
     run_suite,
@@ -23,6 +24,7 @@ from evals.harness import (
     summarize,
 )
 from kama_claude.core.config import load_settings
+from kama_claude.core.llm.anthropic_provider import supports_effort
 
 
 def _check_approval(approve: bool) -> None:
@@ -90,8 +92,10 @@ def main() -> None:
     settings = settings.model_copy(update=update)
     if settings.anthropic_api_key is None:
         raise SystemExit("no ANTHROPIC_API_KEY (env, ./.env or ~/.kama/.env)")
+    effort = settings.effort if supports_effort(settings.model) else None
     print(
         f"running {len(tasks)} tasks × {args.reps} reps on {settings.model} "
+        f"(effort={effort or 'API default'}) "
         f"(variant={args.variant}, concurrency={args.concurrency}); the agent's bash is "
         "auto-approved, so run this on a disposable machine"
     )
@@ -102,7 +106,13 @@ def main() -> None:
         concurrency=args.concurrency,
         timeout_s=args.timeout_s,
     )
-    asyncio.run(run_suite(tasks, cfg))
+    try:
+        asyncio.run(run_suite(tasks, cfg))
+    except SuiteAborted as e:
+        raise SystemExit(
+            f"\nABORTED: a request error will repeat on every trial, so the run stopped.\n{e}\n"
+            "Fix the configuration, then re-run the same command (scored trials are kept)."
+        ) from e
     print()
     print(summarize(cfg.variant_dir))
 

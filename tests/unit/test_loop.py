@@ -241,3 +241,11 @@ async def test_approval_wait_is_timed_separately_from_execution(tmp_path: Path) 
     assert write.approval_ms >= 250  # type: ignore[union-attr]
     assert write.duration_ms < 250  # type: ignore[union-attr]  # execution only
     assert ls.approval_ms == 0  # type: ignore[union-attr]  # read-only: never asked
+
+
+async def test_llm_error_retryability_reaches_run_result(tmp_path: Path) -> None:
+    p = ScriptedProvider([LLMError("API error 400: bad param", retryable=False)])
+    loop, sink = make_loop(p, tmp_path)
+    r = await loop.run("go", "r1")
+    assert r.retryable is False
+    assert sink.events[-1].retryable is False  # type: ignore[union-attr]

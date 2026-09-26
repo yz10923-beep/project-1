@@ -158,3 +158,11 @@ async def test_missing_credentials_become_non_retryable_llm_error(
     with pytest.raises(LLMError) as exc:
         await p.complete(system="s", messages=[{"role": "user", "content": "hi"}], tools=[])
     assert not exc.value.retryable and "ANTHROPIC_API_KEY" in str(exc.value)
+
+
+def test_effort_is_not_sent_to_models_that_reject_it() -> None:
+    haiku = AnthropicProvider(model="claude-haiku-4-5", max_tokens=1, effort="high", api_key="k")
+    assert haiku.effort is None
+    assert "output_config" not in haiku.build_request(system="s", messages=[], tools=[])
+    opus = AnthropicProvider(model="claude-opus-5", max_tokens=1, effort="high", api_key="k")
+    assert opus.effort == "high"

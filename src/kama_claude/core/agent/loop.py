@@ -50,6 +50,7 @@ class RunResult:
     steps: int
     usage: Usage
     error: str | None = None
+    retryable: bool | None = None  # set when the run failed on an LLM API error
 
 
 def _ms_since(t0: float) -> int:
@@ -95,7 +96,12 @@ class AgentLoop:
             )
         )
 
-        async def finish(status: RunStatus, text: str = "", error: str | None = None) -> RunResult:
+        async def finish(
+            status: RunStatus,
+            text: str = "",
+            error: str | None = None,
+            retryable: bool | None = None,
+        ) -> RunResult:
             await self._sink.emit(
                 RunFinishedEvent(
                     **self._meta(run_id),
@@ -105,9 +111,10 @@ class AgentLoop:
                     usage=usage,
                     duration_ms=_ms_since(t0),
                     error=error,
+                    retryable=retryable,
                 )
             )
-            return RunResult(run_id, status, text, steps, usage, error)
+            return RunResult(run_id, status, text, steps, usage, error, retryable)
 
         system = system_prompt(self._ctx.workspace)
         tools = self._registry.specs()
@@ -122,7 +129,7 @@ class AgentLoop:
                         system=system, messages=messages, tools=tools
                     )
                 except LLMError as e:
-                    return await finish("error", error=str(e))
+                    return await finish("error", error=str(e), retryable=e.retryable)
                 usage = usage + resp.usage
                 await self._sink.emit(
                     LLMResponseEvent(
