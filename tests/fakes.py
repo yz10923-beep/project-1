@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from dataclasses import dataclass, field
 from typing import Any
 
-from kama_claude.core.llm.types import LLMError, LLMResponse, Message, StopReason, ToolSpec, Usage
+from kama_claude.core.llm.types import (
+    LLMError,
+    LLMResponse,
+    Message,
+    StopReason,
+    TextCallback,
+    ToolSpec,
+    Usage,
+)
 
 
 def text_response(text: str, stop: StopReason = "end_turn") -> LLMResponse:
@@ -41,7 +50,12 @@ class ScriptedProvider:
     requests: list[Request] = field(default_factory=list)
 
     async def complete(
-        self, *, system: str, messages: list[Message], tools: list[ToolSpec]
+        self,
+        *,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        on_text: TextCallback | None = None,
     ) -> LLMResponse:
         # Deep copy: the loop keeps appending to the same list, and we want a snapshot.
         self.requests.append(Request(system, copy.deepcopy(messages), tools))
@@ -50,5 +64,30 @@ class ScriptedProvider:
         item = self.script.pop(0)
         if isinstance(item, LLMError):
             raise item
+        if on_text is not None:  # stream text word by word, like the real provider
+            for block in item.content:
+                if block.get("type") == "text":
+                    for chunk in block["text"].split(" "):
+                        await on_text(chunk + " ")
         # Like a real API, report the serving model on every response.
         return item if item.model else item.model_copy(update={"model": self.model})
+
+
+@dataclass
+class GatedProvider(ScriptedProvider):
+    """Waits for `gate` before every response, so tests can act while a run is live."""
+
+    gate: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def complete(
+        self,
+        *,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        on_text: TextCallback | None = None,
+    ) -> LLMResponse:
+        await self.gate.wait()
+        return await super().complete(
+            system=system, messages=messages, tools=tools, on_text=on_text
+        )

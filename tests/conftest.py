@@ -4,9 +4,11 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -25,7 +27,14 @@ def free_port() -> int:
 
 
 def spawn_daemon(port: int) -> Daemon:
-    env = {**os.environ, "KAMA_PORT": str(port), "KAMA_LOG_LEVEL": "INFO"}
+    state = Path(tempfile.mkdtemp(prefix="kama-daemon-"))
+    env = {
+        **os.environ,
+        "KAMA_PORT": str(port),
+        "KAMA_LOG_LEVEL": "INFO",
+        "KAMA_TOKEN_FILE": str(state / "core.token"),
+        "KAMA_RUNS_DIR": str(state / "runs"),
+    }
     proc = subprocess.Popen(
         [sys.executable, "-m", "kama_claude.core"],
         env=env,

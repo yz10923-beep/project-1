@@ -24,7 +24,7 @@ class ListSink:
         self.events.append(event)
 
     def types(self) -> list[str]:
-        return [e.type for e in self.events]
+        return [e.type for e in self.events if e.type != "llm.delta"]
 
 
 async def allow(_: ToolCall) -> bool:
@@ -188,11 +188,18 @@ async def test_events_jsonl_is_complete_and_ordered(tmp_path: Path) -> None:
             text_response("wrote hello.txt"),
         ]
     )
+    ws = tmp_path / "ws"
+    ws.mkdir()
     result, run_dir = await run_goal(
-        "write hello", settings=Settings(), workspace=tmp_path, approver=allow, provider=p
+        "write hello",
+        settings=Settings(runs_dir=tmp_path / "runs"),
+        workspace=ws,
+        approver=allow,
+        provider=p,
     )
     assert result.status == "completed"
-    assert run_dir.parent == tmp_path / ".kama" / "runs"
+    assert run_dir.parent == tmp_path / "runs"  # outside the workspace
+    tmp_path = ws
     events = [
         EVENT_ADAPTER.validate_json(line)
         for line in (run_dir / "events.jsonl").read_text().splitlines()
@@ -201,10 +208,12 @@ async def test_events_jsonl_is_complete_and_ordered(tmp_path: Path) -> None:
         "run.started",
         "llm.response",
         "tool.started",
+        "tool.approval_requested",
+        "tool.approval_resolved",
         "tool.finished",
         "llm.response",
         "run.finished",
-    ]
+    ]  # llm.delta events are streamed but never written to disk
     assert [e.seq for e in events] == list(range(len(events)))  # type: ignore[union-attr]
     assert {e.run_id for e in events} == {result.run_id}  # type: ignore[union-attr]
     assert (tmp_path / "hello.txt").read_text() == "hi"
@@ -249,3 +258,32 @@ async def test_llm_error_retryability_reaches_run_result(tmp_path: Path) -> None
     r = await loop.run("go", "r1")
     assert r.retryable is False
     assert sink.events[-1].retryable is False  # type: ignore[union-attr]
+
+
+async def test_text_is_streamed_as_deltas_for_the_right_step(tmp_path: Path) -> None:
+    p = ScriptedProvider(
+        [tool_response(("l", "list_dir", {}), text="Looking around."), text_response("All done.")]
+    )
+    loop, sink = make_loop(p, tmp_path)
+    await loop.run("go", "r1")
+    deltas = [e for e in sink.events if e.type == "llm.delta"]
+    by_step: dict[int, str] = {}
+    for d in deltas:
+        by_step[d.step] = by_step.get(d.step, "") + d.text  # type: ignore[union-attr]
+    assert {k: v.strip() for k, v in by_step.items()} == {1: "Looking around.", 2: "All done."}
+
+
+async def test_approval_events_record_who_decided(tmp_path: Path) -> None:
+    from kama_claude.core.agent.loop import ApprovalDecision
+
+    async def timed_out(_: ToolCall) -> ApprovalDecision:
+        return ApprovalDecision(False, "timeout")
+
+    p = ScriptedProvider(
+        [tool_response(("w", "write_file", {"path": "f", "content": "x"})), text_response("ok")]
+    )
+    loop, sink = make_loop(p, tmp_path, approver=timed_out)
+    await loop.run("go", "r1")
+    [resolved] = [e for e in sink.events if e.type == "tool.approval_resolved"]
+    assert (resolved.approved, resolved.by) == (False, "timeout")  # type: ignore[union-attr]
+    assert not (tmp_path / "f").exists()

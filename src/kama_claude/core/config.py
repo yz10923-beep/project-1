@@ -37,8 +37,13 @@ class Settings(BaseModel):
     max_steps: int = Field(default=30, ge=1)
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     refusal_fallback: bool = True
-    runs_dir: Path = Path(".kama/runs")
+    # Outside any workspace, so the agent never reads its own (or other runs') logs.
+    runs_dir: Path = Path("~/.kama/runs")
     anthropic_api_key: SecretStr | None = None
+
+    # daemon: auth token file (mode 0600), and how long a run waits for a human approval
+    token_file: Path = Path("~/.kama/core.token")
+    approval_timeout_s: float = Field(default=600, gt=0)
 
 
 class ConfigError(Exception):

@@ -8,7 +8,15 @@ from typing import Any, get_args
 import anthropic
 from anthropic.types.beta import BetaMessage
 
-from kama_claude.core.llm.types import LLMError, LLMResponse, Message, StopReason, ToolSpec, Usage
+from kama_claude.core.llm.types import (
+    LLMError,
+    LLMResponse,
+    Message,
+    StopReason,
+    TextCallback,
+    ToolSpec,
+    Usage,
+)
 
 # Server-side refusal fallback: on a safety decline the API re-runs the request on
 # another model inside the same call. Only some models accept the parameter.
@@ -100,13 +108,27 @@ class AnthropicProvider:
         return req
 
     async def complete(
-        self, *, system: str, messages: list[Message], tools: list[ToolSpec]
+        self,
+        *,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        on_text: TextCallback | None = None,
     ) -> LLMResponse:
+        """Streamed request: text chunks go to `on_text` as they arrive; the full message
+        is returned at the end. Streaming also avoids HTTP timeouts on long responses.
+
+        eager_input_streaming is deliberately off: tools only run once the complete
+        message is in, so streaming their inputs early would buy nothing."""
         req = self.build_request(system=system, messages=messages, tools=tools)
         # The SDK already retried 408/409/429/5xx and connection errors (max_retries=2),
         # so anything that reaches us here is final for this call.
         try:
-            msg = await self._client.beta.messages.create(**req)
+            async with self._client.beta.messages.stream(**req) as stream:
+                async for event in stream:
+                    if event.type == "text" and on_text is not None:
+                        await on_text(event.text)
+                msg = await stream.get_final_message()
         except anthropic.APIStatusError as e:
             retryable = e.status_code == 429 or e.status_code >= 500
             raise LLMError(f"API error {e.status_code}: {e.message}", retryable=retryable) from e

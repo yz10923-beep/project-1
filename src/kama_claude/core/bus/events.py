@@ -61,6 +61,32 @@ class ToolStartedEvent(_RunEvent):
     input: dict[str, Any]
 
 
+class ToolApprovalRequestedEvent(_RunEvent):
+    type: Literal["tool.approval_requested"] = "tool.approval_requested"
+    step: int
+    tool_use_id: str
+    name: str
+    input: dict[str, Any]
+
+
+class ToolApprovalResolvedEvent(_RunEvent):
+    type: Literal["tool.approval_resolved"] = "tool.approval_resolved"
+    step: int
+    tool_use_id: str
+    approved: bool
+    by: str = Field(description="user | auto | timeout | ...: who or what decided.")
+
+
+class LLMDeltaEvent(BaseModel):
+    """Streamed model text. Ephemeral: broadcast to live clients, never persisted or
+    replayed (llm.response carries the full text), so it has no seq."""
+
+    type: Literal["llm.delta"] = "llm.delta"
+    run_id: str
+    step: int
+    text: str
+
+
 class ToolFinishedEvent(_RunEvent):
     type: Literal["tool.finished"] = "tool.finished"
     step: int
@@ -93,9 +119,17 @@ Event = Annotated[
     | RunStartedEvent
     | LLMResponseEvent
     | ToolStartedEvent
+    | ToolApprovalRequestedEvent
+    | ToolApprovalResolvedEvent
     | ToolFinishedEvent
-    | RunFinishedEvent,
+    | RunFinishedEvent
+    | LLMDeltaEvent,
     Field(discriminator="type"),
 ]
 
 EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
+
+
+def is_durable(event: Event) -> bool:
+    """Durable events are persisted and replayable; ephemeral ones are live-only."""
+    return not isinstance(event, LLMDeltaEvent)
