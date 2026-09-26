@@ -1,0 +1,14 @@
+# Reference task: analysis over data too large to read, with traps that mirror real
+# on-call mistakes. See setup.py for how each trap is built and make_answers.py for how
+# oracle/, wrong/ and alt/ are derived. Direct precursor of the incident-triage agent.
+goal = """
+On-call needs a quick answer from logs/app.log (all timestamps UTC). In the window from
+2024-03-15 09:00:00 (inclusive) to 10:00:00 (exclusive), which service logged the most
+ERROR-level entries, how many did it log in that window, and what was the message of its
+earliest ERROR in that window by timestamp?
+
+Write the answer to answer.json as {"service": "...", "count": N, "first_error": "..."},
+where first_error is the msg text without the surrounding quotes. Do not modify the log.
+"""
+tags = ["analysis", "logs", "finance", "positive"]
+max_steps = 20

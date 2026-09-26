@@ -1,0 +1,5 @@
+{
+  "service": "settlement",
+  "count": 42,
+  "first_error": "Settlement instruction rejected by custodian: SSI mismatch for trade T-7868"
+}

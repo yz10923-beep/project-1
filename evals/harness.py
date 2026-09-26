@@ -15,6 +15,7 @@ Output (per variant, e.g. evals/results/kama-run/baseline/):
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import importlib.util
 import json
@@ -123,10 +124,7 @@ def load_tasks(ids: Iterable[str] | None = None) -> list[Task]:
 
 def run_check(task: Task, ws: Path, outcome: Outcome) -> CheckResult:
     """Import the task's check.py and grade. Exceptions propagate (= grader bug)."""
-    spec = importlib.util.spec_from_file_location(f"evalcheck_{task.id}", task.dir / "check.py")
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_task_module(task.dir, "check")
     try:
         passed, reason = module.check(ws, outcome, task.fixture)
     except subprocess.TimeoutExpired:
@@ -164,7 +162,24 @@ def diff_snapshots(before: dict[str, str], after: dict[str, str]) -> dict[str, s
     return dict(sorted(changed.items()))
 
 
+@functools.cache
+def load_task_module(task_dir: Path, name: str) -> Any:
+    """Import `<task_dir>/<name>.py` once per process (task dirs contain hyphens, so no
+    normal import). Cached so a task's expensive generated inputs are built only once."""
+    path = task_dir / f"{name}.py"
+    mod_name = f"evaltask_{task_dir.name.replace('-', '_')}_{name}"
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    assert spec and spec.loader, path
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec: dataclasses and pickling look modules up by name.
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def fresh_workspace(task: Task, parent: Path, overlay: Path | None = None) -> Path:
+    """Copy fixture/, then run the task's optional setup.py, which generates inputs too
+    big to commit (seeded, so every trial sees identical bytes)."""
     ws = parent / "ws"
     if task.fixture.is_dir():
         shutil.copytree(task.fixture, ws)
@@ -172,6 +187,8 @@ def fresh_workspace(task: Task, parent: Path, overlay: Path | None = None) -> Pa
         ws.mkdir()
     for keep in ws.rglob(".gitkeep"):
         keep.unlink()  # placeholder so git tracks empty fixtures; not part of the task
+    if (task.dir / "setup.py").is_file():
+        load_task_module(task.dir, "setup").setup(ws)
     if overlay is not None:
         shutil.copytree(overlay, ws, dirs_exist_ok=True)
     return ws
@@ -183,8 +200,10 @@ def fresh_workspace(task: Task, parent: Path, overlay: Path | None = None) -> Pa
 def selftest(tasks: list[Task]) -> list[str]:
     """Grade known-good and known-bad end states without calling any model.
 
-    oracle/ (a correct solution) must pass; the untouched fixture (null) and every
-    wrong/<name>/ (plausible-but-wrong or cheating solution) must fail. Returns problems.
+    oracle/ (a correct solution) and every alt/<name>/ (a correct solution formatted
+    differently, proving the grader isn't too rigid) must pass; the untouched fixture
+    (null) and every wrong/<name>/ (plausible-but-wrong or cheating solution) must fail.
+    Returns problems.
     """
     problems: list[str] = []
 
@@ -209,6 +228,10 @@ def selftest(tasks: list[Task]) -> list[str]:
             r = grade(task, wrong, task.oracle_reply)
             if r.passed:
                 problems.append(f"{task.id}: wrong/{wrong.name} PASSED ({r.reason})")
+        for alt in sorted((task.dir / "alt").glob("*/")):
+            r = grade(task, alt, task.oracle_reply)
+            if not r.passed:
+                problems.append(f"{task.id}: alt/{alt.name} FAILED ({r.reason})")
     return problems
 
 

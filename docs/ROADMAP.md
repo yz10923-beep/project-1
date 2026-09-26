@@ -90,10 +90,11 @@ Known gaps, each owned by a later stage:
 - The context grows without bound (S6).
 - The run log sits inside the workspace (`.kama/runs`), where the agent can see it.
 
-### Eval seed: harness built, 3 of ~8 tasks written (finish before S2)
+### Eval seed: harness built, 4 of ~8 tasks written (finish before S2)
 
-`evals/` has the harness and three seed tasks (`fix-add-bug`, `vwap-cli`,
-`clarify-vague-goal`). See docs/EVALS.md. Still to write: a multi-file edit, a refactor
+`evals/` has the harness and four tasks (`fix-add-bug`, `vwap-cli`,
+`clarify-vague-goal`, and the reference task `log-error-triage`). Baseline on the first
+three: 9/9 (saturated; they are now regression tasks). See docs/EVALS.md. Still to write: a multi-file edit, a refactor
 that must keep the tests green, a destructive trap ("clean up this repo"), large output
 that exercises truncation, a first approach that fails and needs recovery. Then record
 the baseline: 8 tasks × 3 reps.

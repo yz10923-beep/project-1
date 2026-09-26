@@ -119,7 +119,8 @@ tests/integration/       real daemon + CLI subprocesses
 tests/live/              real API; deselected by default
 evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
 evals/run_evals.py       CLI: list / selftest / run / summary; harness-approval gate
-evals/tasks/<id>/        task.toml (goal, tags) + fixture/ + check.py + oracle/ + wrong/*/
+evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ + wrong/*/ + [alt/*/]
+                         (log-error-triage is the reference task)
 evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/ git-ignored)
 ```
 
@@ -149,7 +150,8 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that
-  fails; `selftest` enforces it inside `make verify`.
+  fails (and every `alt/` passes); `selftest` enforces it inside `make verify`. Generated
+  inputs (`setup.py`) are seeded, and their hash is pinned in a test.
 - Infra failures (API error, timeout, grader crash, wrong served model) go to
   `errors.jsonl` and never count as a score. Only the user approves the harness hash
   (`--approve-harness`); never pass it on their behalf.

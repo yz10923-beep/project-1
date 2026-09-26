@@ -58,14 +58,36 @@ process guardrails only (did it read the answer key, did it ask before deleting)
   grader works.
 - **Known-bad solutions that fail** (`wrong/<name>/`). Each is a plausible mistake or a
   cheat. If one passes, the grader is too lenient.
+- **Differently formatted correct answers that pass** (`alt/<name>/`). If one fails, the
+  grader is too rigid and is scoring formatting, not correctness.
 - **Test both directions.** If every task rewards acting, "always act" scores 100%.
   `clarify-vague-goal` rewards *not* acting. Add refusal-worthy and ask-first cases.
 - **Take tasks from real use.** Your own runs, failures and complaints are the best source.
   `clarify-vague-goal` is your actual first run. `vwap-cli` is your second.
 
-`selftest` runs every oracle, null (did nothing) and wrong solution through the
-checkers in about a second, for free. It runs inside `make verify` and before every paid
-run.
+`selftest` runs every oracle, alt, null (did nothing) and wrong solution through the
+checkers in about two seconds, for free. It runs inside `make verify` and before every
+paid run.
+
+### Reference task: `log-error-triage`
+
+Copy this one when you write a task that is hard for the right reasons. It asks for the
+service with the most ERRORs in a one-hour window, the count, and the earliest message,
+over a 54k-line (5.4 MB) trading-platform log. Too big to read through the tools, so
+the agent has to filter it.
+
+| File | Role |
+|---|---|
+| `task.toml` | Goal written as an on-call request, with an exact output spec (inclusive/exclusive window, JSON shape) so pass/fail is unambiguous |
+| `setup.py` | Generates the log from a fixed seed at trial start, because it's too big to commit. Each trap is **built explicitly**, not left to chance |
+| `check.py` | Recomputes the answer from `setup.truth()`, never from the agent's copy of the log. Fails if the log was altered. Lenient on format, strict on content. The reason lists each part |
+| `make_answers.py` | Derives `oracle/`, `wrong/` and `alt/` by running each naive approach on the actual file, and asserts every trap still gives a different answer |
+| `wrong/*` | whole-file count, inclusive end, exclusive start, case-insensitive `grep error`, first in file instead of first by time, tampered log |
+| `alt/loose-formatting` | upper-case service, count as a string, quoted message: must pass |
+
+Each trap is a real on-call mistake. A test pins the log's SHA-256, so any change to the
+generator (or to Python's `random`) shows up as a failing test instead of silently
+changing what earlier scores meant.
 
 ## 5. Metrics and error bars
 
