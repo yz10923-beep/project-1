@@ -12,6 +12,8 @@ INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
+# Server-defined range (-32000 to -32099).
+UNAUTHORIZED = -32001
 
 RequestId = str | int
 
@@ -30,6 +32,14 @@ class JsonRpcSuccess(BaseModel):
     jsonrpc: Literal["2.0"] = "2.0"
     id: RequestId
     result: Any
+
+
+class JsonRpcNotification(BaseModel):
+    """Server -> client push. No id, so no response is expected."""
+
+    jsonrpc: Literal["2.0"] = "2.0"
+    method: str
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class JsonRpcErrorObject(BaseModel):

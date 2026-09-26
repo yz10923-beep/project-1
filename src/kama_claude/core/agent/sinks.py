@@ -8,11 +8,14 @@ from typing import IO, Protocol, TextIO
 
 from kama_claude.core.bus.events import (
     Event,
+    LLMDeltaEvent,
     LLMResponseEvent,
     RunFinishedEvent,
     RunStartedEvent,
+    ToolApprovalResolvedEvent,
     ToolFinishedEvent,
     ToolStartedEvent,
+    is_durable,
 )
 
 
@@ -30,6 +33,8 @@ class JsonlEventWriter:
         self._fh: IO[str] = path.open("a", encoding="utf-8")
 
     async def emit(self, event: Event) -> None:
+        if not is_durable(event):
+            return  # streamed text is live-only; llm.response carries the full text
         self._fh.write(event.model_dump_json() + "\n")
         self._fh.flush()
 
@@ -51,11 +56,25 @@ class ConsolePrinter:
 
     def __init__(self, out: TextIO) -> None:
         self._out = out
+        self._streamed_steps: set[int] = set()
+        self._mid_line = False
 
     async def emit(self, event: Event) -> None:
+        if not isinstance(event, LLMDeltaEvent) and self._mid_line:
+            self._out.write("\n")
+            self._mid_line = False
         match event:
+            case LLMDeltaEvent():
+                if event.step not in self._streamed_steps:
+                    self._streamed_steps.add(event.step)
+                    self._out.write("  ")
+                self._out.write(event.text.replace("\n", "\n  "))
+                self._out.flush()
+                self._mid_line = True
             case RunStartedEvent():
                 self._p(f"run {event.run_id} · model={event.model} · workspace={event.workspace}")
+            case ToolApprovalResolvedEvent() if event.by not in ("user", "auto"):
+                self._p(f"  ! approval {event.by}: {'approved' if event.approved else 'denied'}")
             case LLMResponseEvent():
                 u = event.usage
                 self._p(
@@ -64,7 +83,11 @@ class ConsolePrinter:
                     f"cache_read={u.cache_read_input_tokens}"
                 )
                 text = "".join(b.get("text", "") for b in event.content if b.get("type") == "text")
-                if text.strip() and event.stop_reason == "tool_use":
+                if (
+                    text.strip()
+                    and event.stop_reason == "tool_use"
+                    and (event.step not in self._streamed_steps)
+                ):
                     self._p(f"  {_one_line(text, 200)}")
             case ToolStartedEvent():
                 self._p(f"  → {event.name} {_one_line(json.dumps(event.input), 160)}")
@@ -84,7 +107,7 @@ class ConsolePrinter:
                 )
                 if event.error:
                     self._p(f"error: {event.error}")
-                if event.final_text:
+                if event.final_text and not self._streamed_steps:
                     self._p(f"\n{event.final_text}")
             case _:
                 pass

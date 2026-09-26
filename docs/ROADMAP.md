@@ -8,7 +8,7 @@ the demo command works, not "the code is written".
 |---|---|---|---|
 | **S0** ✅ | CLI ↔ daemon over JSON-RPC 2.0 / NDJSON / TCP; typed protocol; config | `kama ping` returns pong from a separately running `kama-core`; error codes tested | Process boundaries, wire contracts, asyncio streams |
 | **S1** ✅ | `kama run "<goal>"`: agent loop (LLM → tool_use → tool_result → …) with read_file / list_dir / write_file / bash; every step appended to `runs/<id>/events.jsonl` | A real goal completes end to end; loop unit-tested against a scripted fake LLM | Raw Messages API mechanics: tool schemas, stop reasons, message assembly |
-| **S2** | Move the runner into the daemon; clients subscribe to an event stream over IPC | Two clients watch the same run live; client crash doesn't kill the run | Pub/sub, backpressure, cancellation in asyncio |
+| **S2** ✅ | Move the runner into the daemon; clients subscribe to an event stream over IPC | Two clients watch the same run live; client crash doesn't kill the run | Pub/sub, backpressure, cancellation in asyncio |
 | **Trace** | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
 | **S3** | Task tools (create/update/list) so the model plans; TUI | A multi-step goal shows a visible plan being executed | Planning as tools, not prompts |
 | **S4** | Sessions: multiple runs share a thread; notes as durable memory | Run 2 uses a fact learned in run 1 without re-reading it | Memory tiers: working context vs. durable notes |
@@ -31,6 +31,43 @@ job search. That changes the priority order:
   steps/run, tokens/run across commits. This is the same muscle the triage
   harness needs (macro-F1, grounding, trajectory efficiency), and the single most
   differentiating thing you can put on a resume.
+
+## S2 notes
+
+Built: runs execute in `kama-core`; `kama run` / `attach` / `runs` / `cancel` are clients;
+text streams live as `llm.delta`; approvals go over IPC; token auth.
+
+Design choices worth defending:
+- **Durable vs ephemeral events.** Every event with a `seq` is persisted and replayable.
+  Streamed text isn't: it's high-volume and redundant with `llm.response`, so it's
+  broadcast live only. A reconnecting client loses in-flight text, never state.
+- **Replay then live, without gaps.** A subscriber gets the stored events from `from_seq`,
+  then live ones. The backlog snapshot and the subscriber registration happen with no
+  `await` between them, and asyncio is single-threaded, so nothing can fall in between;
+  live events already in the backlog are skipped by `seq`.
+- **Backpressure: the run never waits.** Each subscriber has a bounded queue (1000). On
+  overflow the daemon drops that subscriber's queue and ends its stream with
+  `lagged` + `next_seq`; the CLI re-subscribes from there. The alternative (block the
+  run on the slowest client) lets one stuck terminal stall an agent.
+- **Approvals as data.** `tool.approval_requested` / `tool.approval_resolved` are durable
+  events, so the log shows who approved what and how long it took. First answer wins;
+  unanswered requests become a denial after `KAMA_APPROVAL_TIMEOUT_S`.
+- **Ctrl+C vs closing the terminal.** Ctrl+C on `kama run` cancels the run (explicit
+  intent). A dropped connection does not: `kama attach` picks the run up again.
+- **Auth.** Token in a 0600 file, required on every connection. 127.0.0.1 is reachable by
+  every local process and, via DNS rebinding, by web pages.
+
+Bugs found while building (all have tests now):
+- Subscriber was a dataclass, so unhashable; adding it to a set crashed the subscription
+  task *silently*, which showed up as a hang. Fix: identity hashing, plus a done-callback
+  that logs any crashed connection task, plus pytest-timeout.
+- A second daemon that failed to bind had already overwritten the token file, locking
+  clients out of the running daemon. The token is now written only after bind.
+- The streaming callback closed over the loop variable `steps` (ruff B023): deltas could
+  be tagged with the wrong step. Bound as a default argument.
+
+Still open: token counts / latency per span are in events but there's no trace view yet
+(next: Trace). The eval harness still runs in-process via `run_goal`.
 
 ## Interview talking points
 

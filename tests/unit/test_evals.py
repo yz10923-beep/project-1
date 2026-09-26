@@ -7,7 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from evals.harness import RunConfig, load_tasks, run_suite, selftest, summarize
+import pytest
+from evals.harness import RunConfig, SuiteAborted, load_tasks, run_suite, selftest, summarize
 
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.types import LLMError, LLMResponse
@@ -162,3 +163,19 @@ async def test_setup_hook_generates_inputs_for_each_trial(tmp_path: Path) -> Non
     [row] = rows(cfg)
     assert row["grade"]["passed"] == 1.0, row["explanation"]
     assert row["meta"]["changed"] == {"answer.json": "added"}  # generated log is not a change
+
+
+async def test_request_error_is_not_retried_and_aborts_the_suite(tmp_path: Path) -> None:
+    calls = 0
+
+    def factory(s: Settings) -> ScriptedProvider:
+        nonlocal calls
+        calls += 1
+        return ScriptedProvider([LLMError("API error 400: unsupported param", retryable=False)])
+
+    cfg = cfg_for(tmp_path, factory, reps=3, concurrency=1)
+    with pytest.raises(SuiteAborted, match="unsupported param"):
+        await run_suite(load_tasks(["fix-add-bug", "vwap-cli"]), cfg)
+    assert calls == 1  # no retry, and no further trials started
+    [err] = rows(cfg, "errors.jsonl")
+    assert err["class"] == "request_error"

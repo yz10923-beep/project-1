@@ -273,6 +273,11 @@ def harness_sha() -> str:
 # ---------------------------------------------------------------- running trials
 
 
+class SuiteAborted(Exception):
+    """A request error that will repeat on every trial (bad config, unsupported
+    parameter, auth). Fix the config and re-run; scored trials are kept and resumed."""
+
+
 @dataclass
 class RunConfig:
     settings: Settings
@@ -283,6 +288,8 @@ class RunConfig:
     max_attempts: int = 3  # only serving errors are retried
     provider_factory: Callable[[Settings], LLMProvider] | None = None
     results_dir: Path = RESULTS_DIR
+    # Set by the first non-retryable request error; stops the remaining trials.
+    abort_reason: str | None = None
 
     @property
     def variant_dir(self) -> Path:
@@ -413,11 +420,21 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 return None
             if result.status == "error":
                 internal = (result.error or "").startswith("internal error")
-                cls = "harness_error" if internal else "serving_error"
+                if internal:
+                    cls = "harness_error"
+                elif result.retryable is False:
+                    # 400/401/404...: the request itself is wrong (bad config, unsupported
+                    # parameter, auth). Every other trial will fail the same way.
+                    cls = "request_error"
+                else:
+                    cls = "serving_error"
                 _append(
                     vdir / "errors.jsonl",
                     {**err_base, "class": cls, "error": result.error, "usage": usage},
                 )
+                if cls == "request_error":
+                    cfg.abort_reason = f"{task.id} rep{rep}: {result.error}"
+                    return None
                 if internal or attempt == cfg.max_attempts:
                     return None
                 await asyncio.sleep(min(60.0, 2**attempt) * random.uniform(0.5, 1.5))
@@ -467,6 +484,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                     "leak_suspect": _leak_suspect(events),
                     "events": str(run_dir.relative_to(vdir)),
                     "harness_sha": harness_sha(),
+                    "effort": getattr(provider, "effort", settings.effort),
                 },
             }
     return None
@@ -484,6 +502,8 @@ async def run_suite(tasks: list[Task], cfg: RunConfig) -> None:
 
     async def one(task: Task, rep: int) -> None:
         async with sem:
+            if cfg.abort_reason:
+                return
             row = await run_trial(task, rep, cfg)
         if row is None:
             print(f"  {task.id} rep{rep}: NOT SCORED (see errors.jsonl)")
@@ -494,6 +514,8 @@ async def run_suite(tasks: list[Task], cfg: RunConfig) -> None:
         print(f"  {task.id} rep{rep}: {mark} · {row['steps']} steps · {row['wall_s']}s{leak}")
 
     await asyncio.gather(*(one(t, r) for t, r in todo))
+    if cfg.abort_reason:
+        raise SuiteAborted(cfg.abort_reason)
 
 
 def _write_state_file(results_dir: Path) -> None:

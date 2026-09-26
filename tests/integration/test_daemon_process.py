@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+from pathlib import Path
 
 from tests.conftest import Daemon, free_port, spawn_daemon
 
@@ -26,11 +27,23 @@ def test_cli_ping_against_daemon(daemon: Daemon) -> None:
     assert out.stdout.startswith("pong server=")
 
 
-def test_cli_ping_without_daemon_exits_3() -> None:
-    env = {**os.environ, "KAMA_PORT": str(free_port())}
+def test_cli_ping_without_daemon_exits_3(tmp_path: Path) -> None:
+    env = {**os.environ, "KAMA_PORT": str(free_port()), "KAMA_TOKEN_FILE": str(tmp_path / "t")}
     out = run_cli("ping", env=env)
     assert out.returncode == 3
-    assert "cannot reach kama-core" in out.stderr
+    assert "is kama-core running?" in out.stderr
+
+
+def test_token_file_is_private(daemon: Daemon) -> None:
+    mode = Path(daemon.env["KAMA_TOKEN_FILE"]).stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_cli_lists_runs_and_rejects_unknown_ids(daemon: Daemon) -> None:
+    out = run_cli("runs", env=daemon.env)
+    assert out.returncode == 0 and "no runs" in out.stdout
+    out = run_cli("cancel", "20990101-000000-000000", env=daemon.env)
+    assert out.returncode == 1 and "unknown run" in out.stderr
 
 
 def test_second_daemon_on_same_port_fails(daemon: Daemon) -> None:

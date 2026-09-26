@@ -23,10 +23,13 @@ from typing import Any
 from kama_claude.core.agent.prompts import system_prompt
 from kama_claude.core.agent.sinks import EventSink
 from kama_claude.core.bus.events import (
+    LLMDeltaEvent,
     LLMResponseEvent,
     RunFinishedEvent,
     RunStartedEvent,
     RunStatus,
+    ToolApprovalRequestedEvent,
+    ToolApprovalResolvedEvent,
     ToolFinishedEvent,
     ToolStartedEvent,
 )
@@ -36,8 +39,16 @@ from kama_claude.core.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-# Decides whether a side-effecting tool call may run. S5 replaces this with a policy engine.
-type Approver = Callable[[ToolCall], Awaitable[bool]]
+
+@dataclass(frozen=True)
+class ApprovalDecision:
+    approved: bool
+    by: str  # user | auto | timeout | ...
+
+
+# Decides whether a side-effecting tool call may run. May return a plain bool (taken as
+# the user's answer). S5 replaces this with a policy engine.
+type Approver = Callable[[ToolCall], Awaitable[bool | ApprovalDecision]]
 
 DENIED_MESSAGE = "The user denied this tool call. Do not retry it; choose another approach or stop."
 
@@ -50,6 +61,7 @@ class RunResult:
     steps: int
     usage: Usage
     error: str | None = None
+    retryable: bool | None = None  # set when the run failed on an LLM API error
 
 
 def _ms_since(t0: float) -> int:
@@ -95,7 +107,12 @@ class AgentLoop:
             )
         )
 
-        async def finish(status: RunStatus, text: str = "", error: str | None = None) -> RunResult:
+        async def finish(
+            status: RunStatus,
+            text: str = "",
+            error: str | None = None,
+            retryable: bool | None = None,
+        ) -> RunResult:
             await self._sink.emit(
                 RunFinishedEvent(
                     **self._meta(run_id),
@@ -105,9 +122,10 @@ class AgentLoop:
                     usage=usage,
                     duration_ms=_ms_since(t0),
                     error=error,
+                    retryable=retryable,
                 )
             )
-            return RunResult(run_id, status, text, steps, usage, error)
+            return RunResult(run_id, status, text, steps, usage, error, retryable)
 
         system = system_prompt(self._ctx.workspace)
         tools = self._registry.specs()
@@ -117,12 +135,17 @@ class AgentLoop:
             while steps < self._max_steps:
                 steps += 1
                 t_llm = time.monotonic()
+
+                # Bound as a default: a closure over `steps` would see later values.
+                async def on_text(text: str, step: int = steps) -> None:
+                    await self._sink.emit(LLMDeltaEvent(run_id=run_id, step=step, text=text))
+
                 try:
                     resp = await self._provider.complete(
-                        system=system, messages=messages, tools=tools
+                        system=system, messages=messages, tools=tools, on_text=on_text
                     )
                 except LLMError as e:
-                    return await finish("error", error=str(e))
+                    return await finish("error", error=str(e), retryable=e.retryable)
                 usage = usage + resp.usage
                 await self._sink.emit(
                     LLMResponseEvent(
@@ -185,9 +208,31 @@ class AgentLoop:
         denied = False
         tool = self._registry.get(call.name)
         if tool is not None and tool.requires_approval:
+            await self._sink.emit(
+                ToolApprovalRequestedEvent(
+                    **self._meta(run_id),
+                    step=step,
+                    tool_use_id=call.id,
+                    name=call.name,
+                    input=call.input,
+                )
+            )
             t_wait = time.monotonic()
-            denied = not await self._approver(call)
+            answer = await self._approver(call)
             approval_ms = _ms_since(t_wait)
+            decision = (
+                answer if isinstance(answer, ApprovalDecision) else ApprovalDecision(answer, "user")
+            )
+            denied = not decision.approved
+            await self._sink.emit(
+                ToolApprovalResolvedEvent(
+                    **self._meta(run_id),
+                    step=step,
+                    tool_use_id=call.id,
+                    approved=decision.approved,
+                    by=decision.by,
+                )
+            )
         if denied:
             result = ToolResult(DENIED_MESSAGE, is_error=True)
         else:

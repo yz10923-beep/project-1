@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S1 done → S2 next**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S2 done → Trace next**.
 
 ### Commands
 
@@ -76,8 +76,12 @@ uv run pytest tests/unit/test_server.py::test_ping_roundtrip -v
 uv run kama-core                      # daemon, foreground; Ctrl+C / SIGTERM to stop
 KAMA_PORT=8000 uv run kama-core       # config via KAMA_* env vars or .env
 uv run kama ping                      # exit 0 ok, 1 rpc error, 2 bad config, 3 daemon unreachable
-uv run kama run "fix the failing test" # agent run in-process (S1); asks before bash/write_file
+uv run kama run "fix the failing test" # runs in kama-core; streams; asks before bash/write_file
 uv run kama run -y -w ../other "..."  # auto-approve, different workspace
+uv run kama run --detach "..."        # print run id and return; the run keeps going
+uv run kama attach RUN_ID             # watch (and answer approvals) from another terminal
+uv run kama runs | kama cancel RUN_ID
+uv run kama run --local "..."         # in-process, no daemon (S1 behaviour)
 make live                             # real-API tests (needs ANTHROPIC_API_KEY; costs money)
 
 uv run python -m evals.run_evals list      # eval tasks (docs/EVALS.md explains everything)
@@ -89,7 +93,8 @@ uv run python -m evals.run_evals summary [--variant v1]
 Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the API key in
 `~/.kama/.env` so it works from any workspace): `ANTHROPIC_API_KEY`, `KAMA_MODEL` (default `claude-opus-5`),
 `KAMA_MAX_STEPS` (30), `KAMA_MAX_TOKENS` (16000), `KAMA_EFFORT` (unset = API default),
-`KAMA_REFUSAL_FALLBACK` (true; only sent for models that support it), `KAMA_RUNS_DIR` (`.kama/runs`).
+`KAMA_REFUSAL_FALLBACK` (true; only sent for models that support it), `KAMA_RUNS_DIR` (`~/.kama/runs`),
+`KAMA_TOKEN_FILE` (`~/.kama/core.token`), `KAMA_APPROVAL_TIMEOUT_S` (600).
 
 ### Layout
 
@@ -97,13 +102,13 @@ Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the
 src/kama_claude/
   core/
     bus/envelope.py      JSON-RPC 2.0 request/success/error models + error codes
-    bus/commands.py      per-method params/result models (the command contract)
-    bus/events.py        server-pushed events: discriminated union on `type`
+    bus/commands.py      per-method params/result models + notification names (the contract)
+    bus/events.py        run events: discriminated union on `type`; durable vs ephemeral
     transport/framing.py NDJSON read/write, 1 MiB frame cap
-    transport/server.py  JsonRpcServer: register(method, ParamsModel, handler)
-    transport/client.py  JsonRpcClient: call(method, params, ResultModel)
+    transport/server.py  JsonRpcServer + Connection (locked writes, notify, spawn); token auth
+    transport/client.py  JsonRpcClient: reader task, concurrent call(), notifications()
     config.py            defaults -> ~/.kama/.env -> ./.env -> env vars (pydantic-validated)
-    app.py               CoreApp: wires handlers, signal handling, lifecycle
+    app.py               CoreApp: token, run.* / approval.respond handlers, lifecycle
     llm/types.py         LLMProvider protocol, LLMResponse (raw blocks + parsed views), Usage
     llm/anthropic_provider.py  Messages API via raw SDK; error mapping; caching; fallbacks
     tools/base.py        Tool[Params] ABC, ToolResult, workspace path confinement
@@ -111,10 +116,11 @@ src/kama_claude/
     tools/builtin.py     read_file, list_dir, write_file, bash
     agent/loop.py        AgentLoop: model -> tools -> results -> repeat; emits run events
     agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
-    agent/runner.py      run_goal(): run id, run dir, provider, registry, sinks
-  cli/main.py            argparse CLI; maps failures to exit codes
-tests/fakes.py           ScriptedProvider: canned LLM responses, records requests
-tests/unit/              protocol, config, server, tools, loop, provider (mock HTTP)
+    agent/runner.py      build_loop(), run_goal() (in-process: --local, evals)
+    agent/manager.py     RunManager (daemon): runs, fan-out with replay, approvals, cancel
+  cli/main.py            run / attach / runs / cancel / ping; watch() renders + answers approvals
+tests/fakes.py           ScriptedProvider (streams its text), GatedProvider (waits on an Event)
+tests/unit/              protocol, config, server, tools, loop, provider (mock SSE), daemon, CLI
 tests/integration/       real daemon + CLI subprocesses
 tests/live/              real API; deselected by default
 evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
@@ -147,6 +153,20 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   through `asyncio.to_thread`, because the loop moves into the daemon's event loop in S2.
 - Tool specs are sorted and the system prompt holds nothing volatile, which keeps the
   prompt-cache prefix stable.
+- Every request needs `core.hello` with the daemon's token first (file mode 0600,
+  written only after the port is bound). The daemon runs shell commands; 127.0.0.1 is
+  not a security boundary.
+- A run never waits for a client and outlives every client. Subscribers have bounded
+  queues; a slow one gets `run.stream_end` reason `lagged` with `next_seq` and resumes.
+  Only `run.cancel` or daemon shutdown stops a run (and it still writes run.finished).
+- Subscribe = replay durable events from `from_seq`, then live, with no await between
+  the backlog snapshot and registration (no gap, no duplicate). `llm.delta` is
+  ephemeral: broadcast live, never persisted or replayed; it has no seq.
+- Approval requests and their resolution (by user / auto / timeout) are durable events;
+  the first client to answer wins, and unanswered requests are denied after the timeout.
+- Run logs live outside workspaces (`~/.kama/runs`), so the agent can't read them.
+- Background tasks must log their exceptions (`Connection.spawn` does); a silent task
+  crash turns a bug into a hang. pytest has a 60s per-test timeout for the same reason.
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

@@ -9,12 +9,15 @@ block dicts, and the parsed fields are read-only conveniences over them.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
 type Message = dict[str, Any]
 type ToolSpec = dict[str, Any]
+# Called with each chunk of model text as it streams in.
+type TextCallback = Callable[[str], Awaitable[None]]
 
 StopReason = Literal[
     "end_turn",
@@ -83,5 +86,10 @@ class LLMProvider(Protocol):
     def model(self) -> str: ...
 
     async def complete(
-        self, *, system: str, messages: list[Message], tools: list[ToolSpec]
+        self,
+        *,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        on_text: TextCallback | None = None,
     ) -> LLMResponse: ...
