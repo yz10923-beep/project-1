@@ -223,6 +223,8 @@ async def test_full_loop_over_mocked_http_sends_valid_wire_format(tmp_path: Any)
     assert r.status == "completed" and r.final_text.strip() == "It says alpha."
     deltas = "".join(e.text for e in sink_events if e.type == "llm.delta")
     assert deltas.strip() == "It says alpha."  # streamed as it arrived
+    responses = [e for e in sink_events if e.type == "llm.response"]
+    assert all(e.ttft_ms is not None and e.ttft_ms >= 0 for e in responses)  # TTFT measured
     first, second = bodies
     assert first["stream"] is True
     assert first["model"] == "claude-opus-5" and first["fallbacks"] == "default"

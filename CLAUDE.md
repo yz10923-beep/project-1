@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S2 done → Trace next**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **Trace done → S3 next**.
 
 ### Commands
 
@@ -82,6 +82,9 @@ uv run kama run --detach "..."        # print run id and return; the run keeps g
 uv run kama attach RUN_ID             # watch (and answer approvals) from another terminal
 uv run kama runs | kama cancel RUN_ID
 uv run kama run --local "..."         # in-process, no daemon (S1 behaviour)
+uv run kama trace [RUN_ID]            # where a run's time/tokens/cost went (default: latest)
+uv run kama trace RUN_ID --chrome t.json   # open in https://ui.perfetto.dev
+python3 scripts/fake_api.py 7622 &    # offline end-to-end: ANTHROPIC_BASE_URL=http://127.0.0.1:7622
 make live                             # real-API tests (needs ANTHROPIC_API_KEY; costs money)
 
 uv run python -m evals.run_evals list      # eval tasks (docs/EVALS.md explains everything)
@@ -110,7 +113,11 @@ src/kama_claude/
     config.py            defaults -> ~/.kama/.env -> ./.env -> env vars (pydantic-validated)
     app.py               CoreApp: token, run.* / approval.respond handlers, lifecycle
     llm/types.py         LLMProvider protocol, LLMResponse (raw blocks + parsed views), Usage
-    llm/anthropic_provider.py  Messages API via raw SDK; error mapping; caching; fallbacks
+    llm/anthropic_provider.py  Messages API via raw SDK (streamed); TTFT; errors; caching
+    llm/pricing.py       one price table; cost_usd(model, usage) (None if unpriced)
+    trace/span.py        Span: trace_id, span_id, parent_id, kind (agent|llm|tool|bus|ipc)
+    trace/tracer.py      Tracer: span() context manager (ContextVar parents), record()
+    trace/analyze.py     summarize() (pure), render() text report, to_chrome() export
     tools/base.py        Tool[Params] ABC, ToolResult, workspace path confinement
     tools/registry.py    validate input -> run -> every failure becomes an is_error result
     tools/builtin.py     read_file, list_dir, write_file, bash
@@ -118,7 +125,8 @@ src/kama_claude/
     agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
     agent/runner.py      build_loop(), run_goal() (in-process: --local, evals)
     agent/manager.py     RunManager (daemon): runs, fan-out with replay, approvals, cancel
-  cli/main.py            run / attach / runs / cancel / ping; watch() renders + answers approvals
+  cli/main.py            run / attach / runs / cancel / ping / trace; watch() renders + answers
+scripts/fake_api.py      fake streaming Messages API with realistic timing (offline smoke tests)
 tests/fakes.py           ScriptedProvider (streams its text), GatedProvider (waits on an Event)
 tests/unit/              protocol, config, server, tools, loop, provider (mock SSE), daemon, CLI
 tests/integration/       real daemon + CLI subprocesses
@@ -167,6 +175,16 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
 - Run logs live outside workspaces (`~/.kama/runs`), so the agent can't read them.
 - Background tasks must log their exceptions (`Connection.spawn` does); a silent task
   crash turns a bug into a hang. pytest has a 60s per-test timeout for the same reason.
+- Every run writes `trace.jsonl` next to `events.jsonl`: spans run > step > llm.call /
+  tool X > tool.approval / tool.exec, plus `bus.subscribe` (one per client, with delivery
+  lag) and `rpc <method>` (IPC). Requests not tied to a run go to `<runs>/_daemon/`.
+- Parent links come from a ContextVar, never a global: concurrent tasks must not nest
+  into each other. A span from another trace becomes a `linked_span` attr, not a parent.
+- Span start is wall-clock (timeline placement); duration is monotonic (NTP-safe).
+- Unknown prices are None ("cost unknown"), never $0. Secrets (the token) never reach
+  a trace.
+- The daemon shares one SDK client per API key (built at startup): constructing one
+  costs ~50-80ms and a shared client keeps its connection pool.
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

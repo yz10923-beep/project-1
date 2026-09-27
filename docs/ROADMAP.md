@@ -9,7 +9,7 @@ the demo command works, not "the code is written".
 | **S0** ✅ | CLI ↔ daemon over JSON-RPC 2.0 / NDJSON / TCP; typed protocol; config | `kama ping` returns pong from a separately running `kama-core`; error codes tested | Process boundaries, wire contracts, asyncio streams |
 | **S1** ✅ | `kama run "<goal>"`: agent loop (LLM → tool_use → tool_result → …) with read_file / list_dir / write_file / bash; every step appended to `runs/<id>/events.jsonl` | A real goal completes end to end; loop unit-tested against a scripted fake LLM | Raw Messages API mechanics: tool schemas, stop reasons, message assembly |
 | **S2** ✅ | Move the runner into the daemon; clients subscribe to an event stream over IPC | Two clients watch the same run live; client crash doesn't kill the run | Pub/sub, backpressure, cancellation in asyncio |
-| **Trace** | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
+| **Trace** ✅ | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
 | **S3** | Task tools (create/update/list) so the model plans; TUI | A multi-step goal shows a visible plan being executed | Planning as tools, not prompts |
 | **S4** | Sessions: multiple runs share a thread; notes as durable memory | Run 2 uses a fact learned in run 1 without re-reading it | Memory tiers: working context vs. durable notes |
 | **S5** | Tool safety: param validation, permission policy + approval flow, failure classification, retry | A denied `bash rm` is blocked and the model recovers; transient errors retry, permanent don't | Failure handling for agents |
@@ -68,6 +68,45 @@ Bugs found while building (all have tests now):
 
 Still open: token counts / latency per span are in events but there's no trace view yet
 (next: Trace). The eval harness still runs in-process via `run_goal`.
+
+## Trace notes
+
+Built: a hand-rolled tracer (same data model as OpenTelemetry / Langfuse / LangSmith),
+spans across three layers (LLM, agent + event bus, IPC), `kama trace` (breakdown,
+tokens, cache hit, cost, waterfall, slowest spans, per-client delivery lag, per-method
+IPC latency) and a Perfetto export.
+
+Design choices worth defending:
+- **Spans vs events.** Events record what happened (for replay); spans record how long
+  each part took and inside what (for performance). Same run, two questions, two files.
+- **ContextVar for parent links.** A global "current span" breaks as soon as two asyncio
+  tasks run concurrently; each task gets its own context copy, so a task created inside
+  a span still sees the right parent and siblings never nest.
+- **Wall-clock start, monotonic duration.** Wall-clock places spans on a timeline;
+  monotonic durations can't go negative when NTP adjusts the clock.
+- **TTFT measured in the provider, at the first content delta** (not message_start,
+  which arrives before generation). TTFT separates "slow to start" from "wrote a lot";
+  tokens/s is computed over generation time only.
+- **Pure analysis.** `summarize()` takes spans and returns numbers, so its maths is tested
+  with hand-made spans and exact values; rendering is separate.
+- **Cross-trace links.** A run started from an IPC request is linked to it
+  (`linked_span`) instead of parented, so each trace file stands alone.
+- **Unknown cost is None, not $0.** A zero cost looks like data and hides a missing price.
+
+What the trace found (the point of building it):
+- `run.start` took 83 ms. Measured the cause: constructing an Anthropic SDK client costs
+  50-80 ms, and the daemon built one per run (also losing the connection pool, so each
+  run's first call paid a TLS handshake). Fix: one shared client per API key, built at
+  startup. Result: 79.7 ms -> 0.94 ms, and 2.7 ms on the first run after a restart.
+
+Bugs found by the new tests:
+- Subscription spans recorded the client as `?`: the client name was never passed
+  through. The test asserting both client names caught it.
+- `Tracer.record(**attrs)` let an attribute dict collide with named parameters
+  (`error`, `parent_id`); mypy flagged it. It now takes an explicit `attrs=` mapping.
+
+Still open: spans stay local (JSONL). Exporting to Langfuse/OTLP is a thin adapter over
+the same Span model when it's needed; the eval harness could record per-trial TTFT.
 
 ## Interview talking points
 

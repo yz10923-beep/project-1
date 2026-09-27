@@ -44,6 +44,7 @@ from kama_claude.core.bus.events import (
     ToolStartedEvent,
 )
 from kama_claude.core.config import Settings
+from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import LLMProvider, ToolCall
 
 FLOW = "kama-run"
@@ -55,16 +56,7 @@ APPROVAL_FILE = EVALS_DIR / "harness.sha256"
 # Files that are build noise, not agent output.
 _IGNORED_PARTS = {"__pycache__", ".pytest_cache", ".kama"}
 
-# $ per million tokens (input, output), first-party API. Cache write = 1.25x input,
-# cache read = 0.1x input. Cost is derived at summary time from each row's served
-# model, so a model swap can never be priced at a stale rate.
-PRICES: dict[str, tuple[float, float]] = {
-    "claude-fable-5-1": (10.0, 50.0),
-    "claude-opus-5-5": (4.0, 20.0),
-    "claude-opus-5": (5.0, 25.0),
-    "claude-sonnet-5": (2.0, 10.0),
-    "claude-haiku-4-5": (1.0, 5.0),
-}
+# Cost: kama_claude.core.llm.pricing.cost_usd (one price table for the agent and evals).
 
 
 # ---------------------------------------------------------------- tasks & checks
@@ -537,19 +529,6 @@ def _write_state_file(results_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------- summary
-
-
-def cost_usd(model: str, usage: dict[str, int]) -> float | None:
-    price = next((p for m, p in PRICES.items() if model.startswith(m)), None)
-    if price is None:
-        return None
-    pin, pout = price
-    return (
-        usage["input_tokens"] * pin
-        + usage["cache_creation_input_tokens"] * pin * 1.25
-        + usage["cache_read_input_tokens"] * pin * 0.1
-        + usage["output_tokens"] * pout
-    ) / 1e6
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:

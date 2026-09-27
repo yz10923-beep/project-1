@@ -15,7 +15,7 @@ from pathlib import Path
 
 from kama_claude import __version__
 from kama_claude.core.agent.loop import Approver
-from kama_claude.core.agent.runner import run_goal
+from kama_claude.core.agent.runner import TRACE_FILE, run_goal, runs_root
 from kama_claude.core.agent.sinks import ConsolePrinter
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
@@ -48,6 +48,7 @@ from kama_claude.core.bus.events import (
 )
 from kama_claude.core.config import ConfigError, Settings, load_settings
 from kama_claude.core.llm.types import ToolCall
+from kama_claude.core.trace.analyze import load_spans, render, to_chrome
 from kama_claude.core.transport.client import CoreUnavailable, JsonRpcClient, RpcError, read_token
 
 EXIT_OK = 0
@@ -229,6 +230,31 @@ async def _cancel(settings: Settings, args: argparse.Namespace) -> int:
     return EXIT_OK if res.cancelled else EXIT_FAILED
 
 
+def _trace(settings: Settings, args: argparse.Namespace) -> int:
+    """Read a run's trace from disk (no daemon needed) and report where the time went."""
+    root = runs_root(settings, Path.cwd())
+    run_id = args.run_id
+    if run_id is None:  # latest run: ids sort by start time
+        candidates = sorted(
+            p.parent.name for p in root.glob(f"*/{TRACE_FILE}") if p.parent.name != "_daemon"
+        )
+        if not candidates:
+            print(f"kama: no traced runs in {root}", file=sys.stderr)
+            return EXIT_USAGE
+        run_id = candidates[-1]
+    path = root / run_id / TRACE_FILE
+    if not path.is_file():
+        print(f"kama: no trace at {path}", file=sys.stderr)
+        return EXIT_USAGE
+    spans = load_spans(path)
+    if args.chrome:
+        Path(args.chrome).write_text(json.dumps(to_chrome(spans)))
+        print(f"wrote {args.chrome}: open it at https://ui.perfetto.dev")
+        return EXIT_OK
+    print(render(spans, width=args.width))
+    return EXIT_OK
+
+
 def make_approver(auto_yes: bool) -> Approver:
     """In-process (--local) approvals."""
 
@@ -275,6 +301,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("runs", help="list runs in kama-core")
     cancel = sub.add_parser("cancel", help="stop a run")
     cancel.add_argument("run_id")
+    trace = sub.add_parser("trace", help="where a run's time and tokens went")
+    trace.add_argument("run_id", nargs="?", help="default: the latest run")
+    trace.add_argument("--chrome", metavar="FILE", help="write Chrome trace JSON (Perfetto)")
+    trace.add_argument("--width", type=int, default=40, help="timeline width in characters")
     return parser
 
 
@@ -291,7 +321,15 @@ def main(argv: list[str] | None = None) -> None:
             print(f"kama: workspace is not a directory: {args.workspace}", file=sys.stderr)
             raise SystemExit(EXIT_USAGE)
 
-    commands = {"ping": _ping, "run": _run, "attach": _attach, "runs": _runs, "cancel": _cancel}
+    commands = {
+        "ping": _ping,
+        "run": _run,
+        "attach": _attach,
+        "runs": _runs,
+        "cancel": _cancel,
+    }
+    if args.command == "trace":  # reads files only; no daemon, no event loop
+        raise SystemExit(_trace(settings, args))
     try:
         code = asyncio.run(commands[args.command](settings, args))
     except CoreUnavailable as e:

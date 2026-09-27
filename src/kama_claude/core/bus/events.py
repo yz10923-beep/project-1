@@ -51,6 +51,7 @@ class LLMResponseEvent(_RunEvent):
     usage: Usage
     latency_ms: int
     model: str = Field(default="", description="Model that served this call, from the response.")
+    ttft_ms: int | None = Field(default=None, description="Time to first generated token.")
 
 
 class ToolStartedEvent(_RunEvent):

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from kama_claude import __version__
 from kama_claude.core.agent.manager import RunManager, UnknownRun
+from kama_claude.core.agent.runner import TRACE_FILE
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
@@ -41,7 +42,8 @@ from kama_claude.core.bus.commands import (
 from kama_claude.core.bus.events import Event
 from kama_claude.core.config import ConfigError, Settings, load_settings
 from kama_claude.core.llm.types import LLMProvider
-from kama_claude.core.transport.server import Connection, JsonRpcServer, RequestError
+from kama_claude.core.trace.tracer import JsonlSpanWriter, Tracer
+from kama_claude.core.transport.server import Connection, JsonRpcServer, RequestError, RpcRecord
 
 logger = logging.getLogger("kama_claude.core")
 
@@ -81,6 +83,26 @@ class CoreApp:
         self.server.register(RUN_CANCEL, RunCancelParams, self.on_run_cancel)
         self.server.register(RUN_LIST, RunListParams, self.on_run_list)
         self.server.register(APPROVAL_RESPOND, ApprovalRespondParams, self.on_approval_respond)
+        # IPC spans: into the run's trace when the request names a run, else the daemon's.
+        self.daemon_tracer = Tracer(
+            "daemon", JsonlSpanWriter(settings.runs_dir.expanduser() / "_daemon" / TRACE_FILE)
+        )
+        self.server.on_request = self.trace_request
+
+    def trace_request(self, rec: RpcRecord) -> None:
+        run_id = rec.params.get("run_id")
+        if run_id is None and isinstance(rec.result, dict):
+            run_id = rec.result.get("run_id")  # run.start: the id is in the result
+        tracer = self.runs.tracer_for(run_id) if isinstance(run_id, str) else None
+        (tracer or self.daemon_tracer).record(
+            f"rpc {rec.method}",
+            "ipc",
+            start_ns=rec.start_ns,
+            duration_ns=rec.duration_ns,
+            status="ok" if rec.error_code is None else "error",
+            error=None if rec.error_code is None else f"JSON-RPC error {rec.error_code}",
+            attrs={"method": rec.method, "client": rec.client},
+        )
 
     async def on_ping(self, params: PingParams, conn: Connection) -> PongResult:
         logger.debug("ping from %s", params.client)
@@ -116,7 +138,9 @@ class CoreApp:
 
         async def pump() -> None:
             try:
-                await self.runs.subscribe(params.run_id, params.from_seq, send, end)
+                await self.runs.subscribe(
+                    params.run_id, params.from_seq, send, end, client=conn.client
+                )
             except (ConnectionError, OSError):
                 pass  # client went away; the run carries on
 
@@ -151,6 +175,7 @@ class CoreApp:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self.request_stop)
+        self.runs.warm_up()  # SDK client setup costs ~50-80ms; pay it before serving
         host, port = await self.server.start()
         # Only after binding: a second daemon that fails to start must not overwrite the
         # running daemon's token and lock its clients out.

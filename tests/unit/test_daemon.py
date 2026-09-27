@@ -315,3 +315,52 @@ async def test_bad_requests_get_clear_errors(daemon_factory: Any) -> None:
                 RUN_START, RunStartParams(goal="g", workspace="relative/dir"), RunStartResult
             )
         assert "workspace" in exc.value.message
+
+
+async def test_trace_covers_ipc_and_event_bus_layers(daemon_factory: Any, tmp_path: Path) -> None:
+    from kama_claude.core.agent.runner import TRACE_FILE
+    from kama_claude.core.trace.analyze import load_spans, summarize
+
+    gates: list[GatedProvider] = []
+
+    def gated() -> ScriptedProvider:
+        gates.append(GatedProvider(two_step().script))
+        return gates[-1]
+
+    d = await daemon_factory(gated)
+    async with d.client("alice") as a, d.client("bob") as b:
+        run_id = await start(a, d)
+        watchers = [asyncio.create_task(collect(c, run_id)) for c in (a, b)]
+        await asyncio.sleep(0.05)
+        gates[0].gate.set()
+        await asyncio.gather(*watchers)
+    await asyncio.sleep(0.05)  # subscription spans are written as each stream ends
+
+    spans = load_spans(tmp_path / "runs" / run_id / TRACE_FILE)
+    names = [s.name for s in spans]
+    assert "rpc run.start" in names  # the run id came from the result, not the params
+    assert names.count("rpc run.subscribe") == 2
+    subs = [s for s in spans if s.name == "bus.subscribe"]
+    assert {s.attrs["client"] for s in subs} == {"alice", "bob"}
+    assert all(s.attrs["ended"] == "finished" and s.attrs["live_events"] > 0 for s in subs)
+    assert all(s.attrs["lag_max_ms"] >= s.attrs["lag_mean_ms"] >= 0 for s in subs)
+    assert summarize(spans).ipc["run.subscribe"]["count"] == 2
+
+    daemon_trace = (tmp_path / "runs" / "_daemon" / TRACE_FILE).read_text()
+    assert "rpc core.hello" in daemon_trace
+    assert d.app.token not in daemon_trace  # the auth token is never logged
+
+
+def test_runs_share_one_sdk_client_per_api_key(tmp_path: Path) -> None:
+    from pydantic import SecretStr
+
+    from kama_claude.core.agent.manager import RunManager
+
+    manager = RunManager(Settings(runs_dir=tmp_path, anthropic_api_key="k1"))  # type: ignore[arg-type]
+    a = manager._shared_client_provider(manager._settings)
+    b = manager._shared_client_provider(manager._settings.model_copy(update={"model": "x"}))
+    other = manager._shared_client_provider(
+        manager._settings.model_copy(update={"anthropic_api_key": SecretStr("k2")})
+    )
+    assert a._client is b._client  # type: ignore[attr-defined]
+    assert a._client is not other._client  # type: ignore[attr-defined]

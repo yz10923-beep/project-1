@@ -7,6 +7,8 @@ import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 
+import anthropic
+
 from kama_claude.core.agent.loop import AgentLoop, Approver, RunResult
 from kama_claude.core.agent.sinks import EventSink, FanoutSink, JsonlEventWriter
 from kama_claude.core.config import Settings
@@ -14,6 +16,9 @@ from kama_claude.core.llm.anthropic_provider import AnthropicProvider
 from kama_claude.core.llm.types import LLMProvider
 from kama_claude.core.tools.builtin import builtin_tools
 from kama_claude.core.tools.registry import ToolRegistry
+from kama_claude.core.trace.tracer import JsonlSpanWriter, Tracer
+
+TRACE_FILE = "trace.jsonl"
 
 
 def new_run_id() -> str:
@@ -26,7 +31,10 @@ def runs_root(settings: Settings, workspace: Path) -> Path:
     return (workspace / settings.runs_dir.expanduser()).resolve()
 
 
-def make_provider(settings: Settings) -> LLMProvider:
+def make_provider(
+    settings: Settings, client: anthropic.AsyncAnthropic | None = None
+) -> LLMProvider:
+    """Pass `client` to reuse one SDK client (and its connection pool) across runs."""
     key = settings.anthropic_api_key
     return AnthropicProvider(
         model=settings.model,
@@ -34,7 +42,13 @@ def make_provider(settings: Settings) -> LLMProvider:
         effort=settings.effort,
         refusal_fallback=settings.refusal_fallback,
         api_key=key.get_secret_value() if key else None,
+        client=client,
     )
+
+
+def run_tracer(run_id: str, run_dir: Path) -> Tracer:
+    """Spans for one run go to <run_dir>/trace.jsonl, next to events.jsonl."""
+    return Tracer(run_id, JsonlSpanWriter(run_dir / TRACE_FILE))
 
 
 def build_loop(
@@ -44,6 +58,7 @@ def build_loop(
     sink: EventSink,
     approver: Approver,
     provider: LLMProvider | None = None,
+    tracer: Tracer | None = None,
 ) -> AgentLoop:
     return AgentLoop(
         provider=provider or make_provider(settings),
@@ -52,6 +67,7 @@ def build_loop(
         workspace=workspace,
         approver=approver,
         max_steps=settings.max_steps,
+        tracer=tracer,
     )
 
 
@@ -70,7 +86,12 @@ async def run_goal(
     writer = JsonlEventWriter(run_dir / "events.jsonl")
     sink: EventSink = FanoutSink(writer, extra_sink) if extra_sink else writer
     loop = build_loop(
-        settings, workspace=workspace, sink=sink, approver=approver, provider=provider
+        settings,
+        workspace=workspace,
+        sink=sink,
+        approver=approver,
+        provider=provider,
+        tracer=run_tracer(run_id, run_dir),
     )
     try:
         result = await loop.run(goal, run_id)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, get_args
 
 import anthropic
@@ -123,9 +124,15 @@ class AnthropicProvider:
         req = self.build_request(system=system, messages=messages, tools=tools)
         # The SDK already retried 408/409/429/5xx and connection errors (max_retries=2),
         # so anything that reaches us here is final for this call.
+        t0 = time.perf_counter()
+        ttft_ms: int | None = None
         try:
             async with self._client.beta.messages.stream(**req) as stream:
                 async for event in stream:
+                    # message_start arrives before generation; the first content delta
+                    # (text, thinking or tool input) is the first token.
+                    if ttft_ms is None and event.type == "content_block_delta":
+                        ttft_ms = int((time.perf_counter() - t0) * 1000)
                     if event.type == "text" and on_text is not None:
                         await on_text(event.text)
                 msg = await stream.get_final_message()
@@ -143,4 +150,4 @@ class AnthropicProvider:
                 "or run `ant auth login`",
                 retryable=False,
             ) from e
-        return to_llm_response(msg)
+        return to_llm_response(msg).model_copy(update={"ttft_ms": ttft_ms})
