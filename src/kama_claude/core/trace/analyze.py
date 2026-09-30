@@ -64,6 +64,7 @@ class TraceSummary:
     # Steps whose only tool calls were task_*: a whole model round-trip spent on the plan.
     plan_only_steps: int = 0
     plan_only_ms: float = 0.0
+    task_spans: list[Span] = field(default_factory=list)  # one per task worked on, by id
 
     @property
     def other_ms(self) -> float:
@@ -130,6 +131,9 @@ def summarize(spans: list[Span]) -> TraceSummary:
             summary.plan_tool_calls += s.attrs.get("tool") in PLAN_TOOL_NAMES
         elif s.kind == "bus":
             summary.subscriptions.append({"duration_ms": s.duration_ms, **s.attrs})
+        elif s.kind == "plan":
+            summary.task_spans.append(s)
+    summary.task_spans.sort(key=lambda s: (int(s.attrs.get("task_id", 0)), s.start_ns))
     tools_by_step: dict[str, list[str]] = defaultdict(list)
     for s in spans:
         if s.kind == "tool" and s.parent_id is not None and "tool" in s.attrs:
@@ -212,12 +216,17 @@ def render(spans: list[Span], width: int = 40) -> str:
             lines.append(
                 f"        {s.plan_only_steps} of {s.steps} steps only updated the plan "
                 f"({_fmt_s(s.plan_only_ms)}, {s.plan_only_ms / wall:.0%} of wall time)"
+                + (
+                    f"; {credit} not counted against max_steps"
+                    if (credit := (s.plan or {}).get("budget_credit"))
+                    else ""
+                )
             )
     lines += ["", "timeline" + " " * 21 + "|" + "-" * width + "|"]
     run_start = min(x.start_ns for x in spans if x.name == "run")
     depths = _depths(spans)
     for x in spans:
-        if x.kind in ("bus", "ipc") or x.name == "run":
+        if x.kind in ("bus", "ipc", "plan") or x.name == "run":
             continue
         start = max(0, (x.start_ns - run_start) / 1e6)
         col = min(width - 1, int(start / wall * width))
@@ -233,6 +242,17 @@ def render(spans: list[Span], width: int = 40) -> str:
             extra += f" [{x.status}]"
         lines.append(f"  {label:<27}|{bar:<{width}}| {_fmt_s(x.duration_ms)}{extra}")
 
+    if s.task_spans:
+        lines += ["", "time per task (in_progress -> done)"]
+        for x in s.task_spans:
+            mark = {"completed": "[x]", "cancelled": "[-]"}.get(str(x.attrs.get("outcome")), "[>]")
+            frac = x.duration_ms / wall
+            open_ = "  still open at the end" if x.status == "error" else ""
+            lines.append(
+                f"  {mark} {str(x.attrs.get('task_id', '?')):>2}. "
+                f"{str(x.attrs.get('title', ''))[:30]:<30} {_fmt_s(x.duration_ms):>7} "
+                f"{frac:>4.0%}  {_bar(frac, 16)}{open_}"
+            )
     if s.slowest:
         lines += ["", "slowest"]
         for x in s.slowest:
@@ -265,10 +285,10 @@ def render(spans: list[Span], width: int = 40) -> str:
 def to_chrome(spans: list[Span]) -> dict[str, Any]:
     """Chrome trace-event JSON: open in https://ui.perfetto.dev or chrome://tracing.
     One row per layer: agent/llm/tool, event bus, IPC."""
-    lane = {"agent": 1, "llm": 1, "tool": 1, "bus": 2, "ipc": 3}
+    lane = {"agent": 1, "llm": 1, "tool": 1, "bus": 2, "ipc": 3, "plan": 4}
     events: list[dict[str, Any]] = [
         {"name": "thread_name", "ph": "M", "pid": 1, "tid": tid, "args": {"name": name}}
-        for tid, name in ((1, "agent"), (2, "event bus"), (3, "ipc"))
+        for tid, name in ((1, "agent"), (2, "event bus"), (3, "ipc"), (4, "plan tasks"))
     ]
     for s in spans:
         events.append(

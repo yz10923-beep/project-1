@@ -62,7 +62,8 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S3 done (TUI cut; eval A/B pending) → S4 next**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S3 (full version: task graph, plan steering, TUI) in progress**.
+No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
 
@@ -81,6 +82,7 @@ uv run kama run -y -w ../other "..."  # auto-approve, different workspace
 uv run kama run --detach "..."        # print run id and return; the run keeps going
 uv run kama attach RUN_ID             # watch (and answer approvals) from another terminal
 uv run kama runs | kama cancel RUN_ID
+uv run kama plan show|add|cancel RUN_ID ...   # read a plan; steer a live one
 uv run kama run --local "..."         # in-process, no daemon (S1 behaviour)
 uv run kama trace [RUN_ID]            # where a run's time/tokens/cost went (default: latest)
 uv run kama trace RUN_ID --chrome t.json   # open in https://ui.perfetto.dev
@@ -123,7 +125,7 @@ src/kama_claude/
     tools/base.py        Tool[Params] ABC, ToolResult, workspace path confinement
     tools/registry.py    validate input -> run -> every failure becomes an is_error result
     tools/builtin.py     read_file, list_dir, write_file, bash
-    tools/plan_tools.py  task_create, task_update, task_list (no approval; echo the plan)
+    tools/plan_tools.py  task_create, task_update (batched), task_get, task_list (no approval)
     agent/loop.py        AgentLoop: model -> tools -> results -> repeat; emits run events
     agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
     agent/runner.py      build_loop(), run_goal() (in-process: --local, evals)
@@ -189,12 +191,19 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   a trace.
 - The daemon shares one SDK client per API key (built at startup): constructing one
   costs ~50-80ms and a shared client keeps its connection pool.
-- Each run has its own Plan, changed only by task_* tools. A change emits `plan.updated`
-  with the whole task list (snapshot, not diff). Cancelling a task needs a note; tasks
-  are never deleted.
+- Each run has its own Plan (a task DAG: `blocked_by`, no cycles), changed only by task_*
+  tools or a user's `plan.edit`. Every change is atomic and emits `plan.updated` with the
+  whole task list (snapshot, not diff) and `by` model|user. Only plan tools may emit a
+  model-attributed change. Cancelling needs a note; tasks are never deleted; a task can't
+  start or complete while a blocker is open (cancelled blockers count as resolved).
+- User plan edits reach the model by appending a text block to the next *unsent* user
+  message (never an earlier turn), recorded as `plan.notice`; after pause_turn they wait.
 - Ending the turn with open tasks gets one reminder (`plan.reminder`, durable, appended
   as a user message), never more. With planning off the prompt and tools are exactly
   the S2 ones, so A/B runs change one thing.
+- Plan-only steps (every tool call a plan tool) don't count against `max_steps`, up to
+  `max_steps // 2`; `run.finished` records `plan_only_steps` and `budget_credit`.
+- Each stretch of a task in_progress is a `plan` span (monotonic duration) under `run`.
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

@@ -21,6 +21,8 @@ from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
     PING,
+    PLAN_EDIT,
+    PLAN_GET,
     RUN_CANCEL,
     RUN_LIST,
     RUN_START,
@@ -29,6 +31,10 @@ from kama_claude.core.bus.commands import (
     ApprovalRespondParams,
     ApprovalRespondResult,
     PingParams,
+    PlanEditParams,
+    PlanEditResult,
+    PlanGetParams,
+    PlanGetResult,
     PongResult,
     RunCancelParams,
     RunCancelResult,
@@ -48,6 +54,7 @@ from kama_claude.core.bus.events import (
 )
 from kama_claude.core.config import ConfigError, Settings, load_settings
 from kama_claude.core.llm.types import ToolCall
+from kama_claude.core.plan import NewTask, TaskChange, render_tasks
 from kama_claude.core.trace.analyze import load_spans, render, to_chrome
 from kama_claude.core.transport.client import CoreUnavailable, JsonRpcClient, RpcError, read_token
 
@@ -231,6 +238,30 @@ async def _cancel(settings: Settings, args: argparse.Namespace) -> int:
     return EXIT_OK if res.cancelled else EXIT_FAILED
 
 
+async def _plan(settings: Settings, args: argparse.Namespace) -> int:
+    """Show a run's plan, or steer a live one (the model is told at its next call)."""
+    async with connect(settings) as client:
+        if args.plan_command == "show":
+            got = await client.call(PLAN_GET, PlanGetParams(run_id=args.run_id), PlanGetResult)
+            print(render_tasks(got.tasks) + ("" if got.live else "\n(run finished)"))
+            return EXIT_OK
+        if args.plan_command == "add":
+            params = PlanEditParams(
+                run_id=args.run_id,
+                add=[
+                    NewTask(title=args.title, description=args.description, blocked_by=args.after)
+                ],
+            )
+        else:  # cancel
+            params = PlanEditParams(
+                run_id=args.run_id,
+                changes=[TaskChange(id=args.task_id, status="cancelled", note=args.reason)],
+            )
+        res = await client.call(PLAN_EDIT, params, PlanEditResult)
+    print(f"{res.summary}\n{render_tasks(res.tasks)}")
+    return EXIT_OK
+
+
 def _trace(settings: Settings, args: argparse.Namespace) -> int:
     """Read a run's trace from disk (no daemon needed) and report where the time went."""
     root = runs_root(settings, Path.cwd())
@@ -302,6 +333,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("runs", help="list runs in kama-core")
     cancel = sub.add_parser("cancel", help="stop a run")
     cancel.add_argument("run_id")
+    plan = sub.add_parser("plan", help="show a run's plan, or steer a live one")
+    plan_sub = plan.add_subparsers(dest="plan_command", required=True)
+    show = plan_sub.add_parser("show", help="print the plan")
+    show.add_argument("run_id")
+    add = plan_sub.add_parser("add", help="add a task to a live run's plan")
+    add.add_argument("run_id")
+    add.add_argument("title")
+    add.add_argument("--description", default="")
+    add.add_argument("--after", type=int, nargs="+", default=[], metavar="ID", help="blocked by")
+    cancel_task = plan_sub.add_parser("cancel", help="cancel a task in a live run's plan")
+    cancel_task.add_argument("run_id")
+    cancel_task.add_argument("task_id", type=int)
+    cancel_task.add_argument("--reason", required=True, help="told to the model")
     trace = sub.add_parser("trace", help="where a run's time and tokens went")
     trace.add_argument("run_id", nargs="?", help="default: the latest run")
     trace.add_argument("--chrome", metavar="FILE", help="write Chrome trace JSON (Perfetto)")
@@ -328,6 +372,7 @@ def main(argv: list[str] | None = None) -> None:
         "attach": _attach,
         "runs": _runs,
         "cancel": _cancel,
+        "plan": _plan,
     }
     if args.command == "trace":  # reads files only; no daemon, no event loop
         raise SystemExit(_trace(settings, args))

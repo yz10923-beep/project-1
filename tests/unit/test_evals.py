@@ -183,13 +183,15 @@ async def test_request_error_is_not_retried_and_aborts_the_suite(tmp_path: Path)
 
 def planned_solve_script() -> list[LLMResponse | LLMError]:
     return [
-        tool_response(("c", "task_create", {"tasks": ["fix add", "run the tests"]})),
         tool_response(
-            ("u1", "task_update", {"id": 1, "status": "completed"}),
+            ("c", "task_create", {"tasks": [{"title": "fix add"}, {"title": "run the tests"}]})
+        ),
+        tool_response(
+            ("u1", "task_update", {"updates": [{"id": 1, "status": "completed"}]}),
             ("w", "write_file", {"path": "calc.py", "content": FIXED_CALC}),
         ),
         text_response("Fixed."),  # task 2 still open: the loop reminds once
-        tool_response(("u2", "task_update", {"id": 2, "status": "completed"})),
+        tool_response(("u2", "task_update", {"updates": [{"id": 2, "status": "completed"}]})),
         text_response("Fixed add(); tests pass."),
     ]
 

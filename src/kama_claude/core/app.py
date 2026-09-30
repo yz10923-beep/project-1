@@ -20,6 +20,8 @@ from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
     PING,
+    PLAN_EDIT,
+    PLAN_GET,
     RUN_CANCEL,
     RUN_LIST,
     RUN_START,
@@ -28,6 +30,10 @@ from kama_claude.core.bus.commands import (
     ApprovalRespondParams,
     ApprovalRespondResult,
     PingParams,
+    PlanEditParams,
+    PlanEditResult,
+    PlanGetParams,
+    PlanGetResult,
     PongResult,
     RunCancelParams,
     RunCancelResult,
@@ -42,6 +48,7 @@ from kama_claude.core.bus.commands import (
 from kama_claude.core.bus.events import Event
 from kama_claude.core.config import ConfigError, Settings, load_settings
 from kama_claude.core.llm.types import LLMProvider
+from kama_claude.core.plan import PlanError
 from kama_claude.core.trace.tracer import JsonlSpanWriter, Tracer
 from kama_claude.core.transport.server import Connection, JsonRpcServer, RequestError, RpcRecord
 
@@ -83,6 +90,8 @@ class CoreApp:
         self.server.register(RUN_CANCEL, RunCancelParams, self.on_run_cancel)
         self.server.register(RUN_LIST, RunListParams, self.on_run_list)
         self.server.register(APPROVAL_RESPOND, ApprovalRespondParams, self.on_approval_respond)
+        self.server.register(PLAN_GET, PlanGetParams, self.on_plan_get)
+        self.server.register(PLAN_EDIT, PlanEditParams, self.on_plan_edit)
         # IPC spans: into the run's trace when the request names a run, else the daemon's.
         self.daemon_tracer = Tracer(
             "daemon", JsonlSpanWriter(settings.runs_dir.expanduser() / "_daemon" / TRACE_FILE)
@@ -165,6 +174,23 @@ class CoreApp:
         except UnknownRun as e:
             raise RequestError(f"unknown run: {e}") from e
         return ApprovalRespondResult(accepted=ok)
+
+    async def on_plan_get(self, params: PlanGetParams, conn: Connection) -> PlanGetResult:
+        try:
+            tasks, live = await asyncio.to_thread(self.runs.get_plan, params.run_id)
+        except UnknownRun as e:
+            raise RequestError(f"unknown run: {e}") from e
+        return PlanGetResult(run_id=params.run_id, tasks=tasks, live=live)
+
+    async def on_plan_edit(self, params: PlanEditParams, conn: Connection) -> PlanEditResult:
+        try:
+            tasks, summary = await self.runs.edit_plan(params.run_id, params.add, params.changes)
+        except UnknownRun as e:
+            raise RequestError(f"unknown run: {e}") from e
+        except PlanError as e:
+            raise RequestError(f"plan edit rejected: {e}") from e
+        logger.info("plan of %s edited by %s: %s", params.run_id, conn.client, summary)
+        return PlanEditResult(tasks=tasks, summary=summary)
 
     def request_stop(self) -> None:
         self._stop.set()

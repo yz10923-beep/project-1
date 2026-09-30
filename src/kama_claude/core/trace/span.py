@@ -5,8 +5,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 # The layer a span belongs to: model calls, the agent loop, tool execution, event
-# delivery to clients, and IPC requests.
-SpanKind = Literal["agent", "llm", "tool", "bus", "ipc"]
+# delivery to clients, IPC requests, and plan tasks (in_progress -> done, S3).
+SpanKind = Literal["agent", "llm", "tool", "bus", "ipc", "plan"]
 SpanStatus = Literal["ok", "error", "cancelled"]
 
 

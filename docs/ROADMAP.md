@@ -10,7 +10,7 @@ the demo command works, not "the code is written".
 | **S1** ✅ | `kama run "<goal>"`: agent loop (LLM → tool_use → tool_result → …) with read_file / list_dir / write_file / bash; every step appended to `runs/<id>/events.jsonl` | A real goal completes end to end; loop unit-tested against a scripted fake LLM | Raw Messages API mechanics: tool schemas, stop reasons, message assembly |
 | **S2** ✅ | Move the runner into the daemon; clients subscribe to an event stream over IPC | Two clients watch the same run live; client crash doesn't kill the run | Pub/sub, backpressure, cancellation in asyncio |
 | **Trace** ✅ | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
-| **S3** ✅ | Task tools (create/update/list) so the model plans; ~~TUI~~ (cut, see S3 notes) | A multi-step goal shows a visible plan being executed; the eval A/B says whether planning helps | Planning as tools, not prompts |
+| **S3** | Task tools (create/update/get/list, dependencies) so the model plans; the user can steer the plan; TUI | A multi-step goal shows a visible plan being executed, in the CLI and the TUI; the eval A/B says whether planning helps | Planning as tools, not prompts; a real frontend over the protocol |
 | **S4** | Sessions: multiple runs share a thread; notes as durable memory | Run 2 uses a fact learned in run 1 without re-reading it | Memory tiers: working context vs. durable notes |
 | **S5** | Tool safety: param validation, permission policy + approval flow, failure classification, retry | A denied `bash rm` is blocked and the model recovers; transient errors retry, permanent don't | Failure handling for agents |
 | **S6** | Context governance: token budget, tool_result truncation, compaction | A long session stays under budget with measured quality loss | Context engineering, token accounting |
@@ -21,11 +21,10 @@ the demo command works, not "the code is written".
 This project exists to feed the **incident-triage agent over ELK** and a finance-agent
 job search. That changes the priority order:
 
-- **Must finish:** S1, Trace, S5, S6. Those are the agent-loop, observability, failure-handling
-  and context skills that the triage agent reuses directly and that interviewers ask about.
-- **Do properly but quickly:** S2, S4.
-- **Timebox hard:** the S3 TUI and S7. A pretty terminal UI is not what gets you hired for
-  LLM application work. If the TUI takes more than two days, cut it.
+- **No stage is timeboxed or cut.** Every stage is built to its fullest version (decided
+  during S3; this replaced an earlier "timebox the TUI and S7" rule).
+- **Most reused later:** S1, Trace, S5, S6: the agent-loop, observability, failure-handling
+  and context skills the triage agent reuses directly and interviewers ask about.
 - **Add what the reference lacks:** an eval harness. From S1 on, keep a small frozen set of
   goals with checkable outcomes (file contents, exit codes) and track pass rate,
   steps/run, tokens/run across commits. This is the same muscle the triage

@@ -21,12 +21,13 @@ def tool(i, name, **inp):
     return {"id": f"tu_{i}", "name": name, "input": inp}
 
 REPLIES = [
-    ("I'll plan this first.", [tool(1, "task_create", tasks=["Check the Python version", "Report it"]),
-                               tool(2, "task_update", id=1, status="in_progress")], "tool_use"),
+    ("I'll plan this first.", [tool(1, "task_create", tasks=[{"title": "Check the Python version"},
+                                                             {"title": "Report it", "blocked_by": [1]}]),
+                               tool(2, "task_update", updates=[{"id": 1, "status": "in_progress"}])], "tool_use"),
     ("Checking.", [tool(3, "bash", command="sleep 1; python3 --version")], "tool_use"),
-    ("", [tool(4, "task_update", id=1, status="completed")], "tool_use"),
+    ("", [tool(4, "task_update", updates=[{"id": 1, "status": "completed"}])], "tool_use"),
     ("Python 3 is installed.", [], "end_turn"),  # task 2 still open: expect a reminder
-    ("", [tool(5, "task_update", id=2, status="completed")], "tool_use"),
+    ("", [tool(5, "task_update", updates=[{"id": 2, "status": "completed"}])], "tool_use"),
     ("Python is installed and working. " * 6, [], "end_turn"),
 ]
 

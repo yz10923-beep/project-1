@@ -91,3 +91,33 @@ class GatedProvider(ScriptedProvider):
         return await super().complete(
             system=system, messages=messages, tools=tools, on_text=on_text
         )
+
+
+@dataclass
+class PausingProvider(ScriptedProvider):
+    """Stops before the calls listed in `pause_at` (0-based) until the test resumes it,
+    so a test can act at an exact point in a run: `await p.paused.wait()`, act,
+    `p.resume.set()`."""
+
+    pause_at: set[int] = field(default_factory=set)
+    paused: asyncio.Event = field(default_factory=asyncio.Event)
+    resume: asyncio.Event = field(default_factory=asyncio.Event)
+    calls: int = 0
+
+    async def complete(
+        self,
+        *,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        on_text: TextCallback | None = None,
+    ) -> LLMResponse:
+        if self.calls in self.pause_at:
+            self.paused.set()
+            await self.resume.wait()
+            self.paused.clear()
+            self.resume.clear()
+        self.calls += 1
+        return await super().complete(
+            system=system, messages=messages, tools=tools, on_text=on_text
+        )

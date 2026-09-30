@@ -89,7 +89,7 @@ def test_planned_run_end_to_end_through_the_real_sdk(tmp_path: Path) -> None:
         assert out.returncode == 0, out.stderr
         for line in (
             "  plan (0/2)",
-            "    [ ] 2. Report it",
+            "    [ ] 2. Report it  (blocked by 1)",
             "  [x] 1. Check the Python version  (1/2)",
             "  ! stopped with 1 open task(s); reminding the model of its plan",
             "plan: 2/2 completed · 0 cancelled · 0 open",
