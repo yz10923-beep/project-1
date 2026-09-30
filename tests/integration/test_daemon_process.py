@@ -2,13 +2,39 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import Daemon, free_port, spawn_daemon
+
+
+@pytest.fixture
+def fake_stack() -> Iterator[Daemon]:
+    """A real kama-core whose model is scripts/fake_api.py (fast mode) over HTTP."""
+    api_port = free_port()
+    api = subprocess.Popen(
+        [sys.executable, "scripts/fake_api.py", str(api_port)],
+        env={**os.environ, "FAKE_API_FAST": "1"},
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert api.stdout is not None and "listening" in api.stdout.readline()
+    d = spawn_daemon(
+        free_port(),
+        {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{api_port}", "ANTHROPIC_API_KEY": "fake"},
+    )
+    yield d
+    d.proc.terminate()
+    d.proc.wait(timeout=5)
+    api.terminate()
+    api.wait(timeout=5)
 
 
 def run_cli(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -66,43 +92,61 @@ def test_sigterm_shuts_down_cleanly() -> None:
     assert d.proc.wait(timeout=5) == 0
 
 
-def test_planned_run_end_to_end_through_the_real_sdk(tmp_path: Path) -> None:
+def test_planned_run_end_to_end_through_the_real_sdk(tmp_path: Path, fake_stack: Daemon) -> None:
     """S3 through every real layer: CLI -> daemon -> anthropic SDK -> HTTP/SSE (a fake
     Messages API) and back. The scripted model plans, stops early, is reminded, and
     finishes; the CLI shows the checklist, `runs` the progress, `trace` the cost."""
-    api_port = free_port()
-    api = subprocess.Popen(
-        [sys.executable, "scripts/fake_api.py", str(api_port)],
-        env={**os.environ, "FAKE_API_FAST": "1"},
-        stdout=subprocess.PIPE,
-        text=True,
+    d = fake_stack
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
+    assert out.returncode == 0, out.stderr
+    for line in (
+        "  plan (0/2)",
+        "    [ ] 2. Report it  (blocked by 1)",
+        "  [x] 1. Check the Python version  (1/2)",
+        "  ! stopped with 1 open task(s); reminding the model of its plan",
+        "plan: 2/2 completed · 0 cancelled · 0 open",
+    ):
+        assert line in out.stdout.splitlines(), (line, out.stdout)
+    runs = run_cli("runs", env=d.env)
+    assert "· plan 2/2" in runs.stdout
+    trace = run_cli("trace", env={**d.env})
+    assert trace.returncode == 0, trace.stderr
+    assert "plan    2 tasks · 2 completed" in trace.stdout
+    assert "3 of 6 steps only updated the plan" in trace.stdout  # 1 (create), 3, 5
+    assert "time per task" in trace.stdout
+
+
+async def test_tui_drives_a_planned_run_through_the_real_stack(
+    tmp_path: Path, fake_stack: Daemon
+) -> None:
+    """The TUI (headless, via Textual's Pilot) against a real kama-core process that
+    calls the fake Messages API through the real SDK."""
+    from textual.widgets import Static
+
+    from kama_claude.core.transport.client import JsonRpcClient, read_token
+    from kama_claude.tui.app import KamaTui
+
+    d = fake_stack
+    token = read_token(Path(d.env["KAMA_TOKEN_FILE"]))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    app = KamaTui(
+        lambda: JsonRpcClient("127.0.0.1", d.port, token=token, client_name="kama-tui"),
+        ws,
+        goal="check python",
+        auto_approve=True,
     )
-    assert api.stdout is not None and "listening" in api.stdout.readline()
-    d = spawn_daemon(
-        free_port(),
-        {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{api_port}", "ANTHROPIC_API_KEY": "fake"},
-    )
-    try:
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
-        assert out.returncode == 0, out.stderr
-        for line in (
-            "  plan (0/2)",
-            "    [ ] 2. Report it  (blocked by 1)",
-            "  [x] 1. Check the Python version  (1/2)",
-            "  ! stopped with 1 open task(s); reminding the model of its plan",
-            "plan: 2/2 completed · 0 cancelled · 0 open",
-        ):
-            assert line in out.stdout.splitlines(), (line, out.stdout)
-        runs = run_cli("runs", env=d.env)
-        assert "· plan 2/2" in runs.stdout
-        trace = run_cli("trace", env={**d.env})
-        assert trace.returncode == 0, trace.stderr
-        assert "plan    2 tasks · 2 completed" in trace.stdout
-        assert "3 of 6 steps only updated the plan" in trace.stdout  # 1 (create), 3, 5
-    finally:
-        d.proc.terminate()
-        d.proc.wait(timeout=5)
-        api.terminate()
-        api.wait(timeout=5)
+    async with app.run_test(size=(150, 45)) as pilot:
+        async with asyncio.timeout(30):
+            while app.view is None or not app.view.finished:
+                await pilot.pause(0.05)
+        await pilot.pause()
+        plan = str(app.query_one("#plan", Static).content)
+        log = "\n".join(str(s.content) for s in app.query("#log Static"))
+        status = str(app.query_one("#status", Static).content)
+    assert "2/2 completed" in plan
+    assert "reminded the model" in log and "■ completed after 6 steps" in log
+    assert "Python 3" in log  # the bash output, inside the tool block
+    assert "completed · step 6" in status and "plan 2/2" in status

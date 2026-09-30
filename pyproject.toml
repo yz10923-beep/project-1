@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 kama = "kama_claude.cli.main:main"
 kama-core = "kama_claude.core.app:main"
+kama-tui = "kama_claude.cli.main:tui_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kama_claude"]

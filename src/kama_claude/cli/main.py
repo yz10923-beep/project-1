@@ -262,6 +262,35 @@ async def _plan(settings: Settings, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _tui(settings: Settings, args: argparse.Namespace) -> int:
+    from kama_claude.tui.app import KamaTui  # Textual loads only for this command
+
+    workspace = Path(args.workspace).resolve()
+    if not workspace.is_dir():
+        print(f"kama: workspace is not a directory: {workspace}", file=sys.stderr)
+        return EXIT_USAGE
+    root = runs_root(settings, Path.cwd())
+
+    def trace_report(run_id: str) -> str | None:
+        path = root / run_id / TRACE_FILE
+        if not path.is_file():
+            return None
+        try:
+            return render(load_spans(path), width=60)
+        except ValueError:  # no run span yet: the run is still starting
+            return None
+
+    KamaTui(
+        lambda: connect(settings),
+        workspace,
+        run_id=args.run_id,
+        goal=args.goal,
+        auto_approve=args.yes,
+        trace_report=trace_report,
+    ).run()
+    return EXIT_OK
+
+
 def _trace(settings: Settings, args: argparse.Namespace) -> int:
     """Read a run's trace from disk (no daemon needed) and report where the time went."""
     root = runs_root(settings, Path.cwd())
@@ -346,6 +375,11 @@ def build_parser() -> argparse.ArgumentParser:
     cancel_task.add_argument("run_id")
     cancel_task.add_argument("task_id", type=int)
     cancel_task.add_argument("--reason", required=True, help="told to the model")
+    tui = sub.add_parser("tui", help="full-screen UI: start, watch, approve and steer runs")
+    tui.add_argument("run_id", nargs="?", help="watch this run (default: start from a goal)")
+    tui.add_argument("-w", "--workspace", default=".", help="directory new runs work in")
+    tui.add_argument("-y", "--yes", action="store_true", help="auto-approve new runs")
+    tui.add_argument("--goal", help="start a run with this goal right away")
     trace = sub.add_parser("trace", help="where a run's time and tokens went")
     trace.add_argument("run_id", nargs="?", help="default: the latest run")
     trace.add_argument("--chrome", metavar="FILE", help="write Chrome trace JSON (Perfetto)")
@@ -376,6 +410,8 @@ def main(argv: list[str] | None = None) -> None:
     }
     if args.command == "trace":  # reads files only; no daemon, no event loop
         raise SystemExit(_trace(settings, args))
+    if args.command == "tui":  # Textual runs its own event loop
+        raise SystemExit(_tui(settings, args))
     try:
         code = asyncio.run(commands[args.command](settings, args))
     except CoreUnavailable as e:
@@ -388,3 +424,8 @@ def main(argv: list[str] | None = None) -> None:
         print("\nkama: interrupted", file=sys.stderr)
         code = EXIT_INTERRUPTED
     raise SystemExit(code)
+
+
+def tui_main() -> None:
+    """`kama-tui [args]` is `kama tui [args]`."""
+    main(["tui", *sys.argv[1:]])
