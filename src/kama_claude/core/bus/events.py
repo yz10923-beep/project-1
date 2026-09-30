@@ -14,7 +14,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, TypeAdapter
 
 from kama_claude.core.llm.types import StopReason, Usage
-from kama_claude.core.plan import PlanTask
+from kama_claude.core.plan import ChangedBy, PlanTask
 
 
 class CoreStartedEvent(BaseModel):
@@ -108,8 +108,19 @@ class PlanUpdatedEvent(_RunEvent):
 
     type: Literal["plan.updated"] = "plan.updated"
     step: int
-    tool_use_id: str
+    tool_use_id: str | None = Field(description="The task_* call; None for a user edit.")
     tasks: list[PlanTask]
+    by: ChangedBy = "model"
+    summary: str = Field(default="", description="What changed, for user edits.")
+
+
+class PlanNoticeEvent(_RunEvent):
+    """User plan edits, delivered to the model: `text` was appended to the user message
+    sent at `step`. Durable for the same reason as plan.reminder: it is conversation."""
+
+    type: Literal["plan.notice"] = "plan.notice"
+    step: int
+    text: str
 
 
 class PlanReminderEvent(_RunEvent):
@@ -135,6 +146,12 @@ class RunFinishedEvent(_RunEvent):
     duration_ms: int
     error: str | None = None
     retryable: bool | None = None
+    plan_only_steps: int = Field(
+        default=0, description="Steps whose only tool calls were plan tools (S3)."
+    )
+    budget_credit: int = Field(
+        default=0, description="Plan-only steps not counted against max_steps."
+    )
 
 
 Event = Annotated[
@@ -148,6 +165,7 @@ Event = Annotated[
     | ToolFinishedEvent
     | PlanUpdatedEvent
     | PlanReminderEvent
+    | PlanNoticeEvent
     | RunFinishedEvent
     | LLMDeltaEvent,
     Field(discriminator="type"),

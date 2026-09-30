@@ -11,11 +11,13 @@ dependencies = [
     "anthropic>=0.60",
     "pydantic>=2.7",
     "python-dotenv>=1.0",
+    "textual>=1.0",
 ]
 
 [project.scripts]
 kama = "kama_claude.cli.main:main"
 kama-core = "kama_claude.core.app:main"
+kama-tui = "kama_claude.cli.main:tui_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kama_claude"]

@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kama_claude.core.plan import NewTask, PlanTask, TaskChange
+
 
 class _Params(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -118,6 +120,35 @@ class ApprovalRespondParams(_Params):
 
 class ApprovalRespondResult(BaseModel):
     accepted: bool = Field(description="False if already answered (by another client) or expired.")
+
+
+# ---- plans (S3): read a run's plan; steer a live one
+
+PLAN_GET = "plan.get"
+
+
+class PlanGetParams(_Params):
+    run_id: str
+
+
+class PlanGetResult(BaseModel):
+    run_id: str
+    tasks: list[PlanTask] = Field(description="Empty if the run made no plan.")
+    live: bool = Field(description="False if read from a finished run's events on disk.")
+
+
+PLAN_EDIT = "plan.edit"
+
+
+class PlanEditParams(_Params):
+    run_id: str
+    add: list[NewTask] = Field(default_factory=list, max_length=20)
+    changes: list[TaskChange] = Field(default_factory=list, max_length=20)
+
+
+class PlanEditResult(BaseModel):
+    tasks: list[PlanTask]
+    summary: str = Field(description="What changed; the model is told at its next call.")
 
 
 # ---- server -> client notifications (no response)

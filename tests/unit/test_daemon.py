@@ -18,6 +18,8 @@ from kama_claude.core.app import CoreApp
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
+    PLAN_EDIT,
+    PLAN_GET,
     RUN_CANCEL,
     RUN_LIST,
     RUN_START,
@@ -25,6 +27,10 @@ from kama_claude.core.bus.commands import (
     STREAM_END_NOTIFICATION,
     ApprovalRespondParams,
     ApprovalRespondResult,
+    PlanEditParams,
+    PlanEditResult,
+    PlanGetParams,
+    PlanGetResult,
     RunCancelParams,
     RunCancelResult,
     RunListParams,
@@ -39,8 +45,15 @@ from kama_claude.core.bus.envelope import INVALID_PARAMS
 from kama_claude.core.bus.events import EVENT_ADAPTER, Event
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.types import LLMProvider
+from kama_claude.core.plan import NewTask, TaskChange
 from kama_claude.core.transport.client import JsonRpcClient, RpcError
-from tests.fakes import GatedProvider, ScriptedProvider, text_response, tool_response
+from tests.fakes import (
+    GatedProvider,
+    PausingProvider,
+    ScriptedProvider,
+    text_response,
+    tool_response,
+)
 
 
 @dataclass
@@ -376,14 +389,16 @@ async def test_plan_progress_is_visible_to_late_clients_and_run_list(
         return ScriptedProvider(
             [
                 tool_response(
-                    ("c", "task_create", {"tasks": ["inspect", "run it"]}),
-                    ("u1", "task_update", {"id": 1, "status": "in_progress"}),
+                    ("c", "task_create", {"tasks": [{"title": "inspect"}, {"title": "run it"}]}),
+                    ("u1", "task_update", {"updates": [{"id": 1, "status": "in_progress"}]}),
                 ),
                 tool_response(
-                    ("u2", "task_update", {"id": 1, "status": "completed"}),
+                    ("u2", "task_update", {"updates": [{"id": 1, "status": "completed"}]}),
                     ("b", "bash", {"command": "echo hi"}),  # waits for approval
                 ),
-                tool_response(("u3", "task_update", {"id": 2, "status": "completed"})),
+                tool_response(
+                    ("u3", "task_update", {"updates": [{"id": 2, "status": "completed"}]})
+                ),
                 text_response("done"),
             ]
         )
@@ -414,3 +429,86 @@ async def test_plan_progress_is_visible_to_late_clients_and_run_list(
     assert [s.tool_use_id for s in snaps] == ["c", "u1", "u2", "u3"]  # type: ignore[union-attr]
     assert [t.status for t in snaps[-1].tasks] == ["completed", "completed"]  # type: ignore[union-attr]
     assert (info.plan_done, info.plan_total) == (2, 2)
+
+
+async def test_user_steers_a_live_plan_over_ipc(daemon_factory: Any) -> None:
+    """S3 steering: a client edits a live run's plan; the model is told at its next
+    call; the plan is readable live, and from disk after a restart."""
+
+    def planned() -> ScriptedProvider:
+        return PausingProvider(
+            [
+                tool_response(("c", "task_create", {"tasks": [{"title": "a"}, {"title": "b"}]})),
+                tool_response(
+                    (
+                        "u",
+                        "task_update",
+                        {
+                            "updates": [
+                                {"id": 1, "status": "completed"},
+                                {"id": 3, "status": "completed"},
+                            ]
+                        },
+                    )
+                ),
+                text_response("done"),
+            ],
+            pause_at={1},
+        )
+
+    d = await daemon_factory(planned)
+    async with d.client("tui") as c:
+        run_id = await start(c, d)
+        provider = d.providers[0]
+        assert isinstance(provider, PausingProvider)
+        await provider.paused.wait()
+        edit = await c.call(
+            PLAN_EDIT,
+            PlanEditParams(
+                run_id=run_id,
+                add=[NewTask(title="write the summary")],
+                changes=[TaskChange(id=2, status="cancelled", note="not needed")],
+            ),
+            PlanEditResult,
+        )
+        assert (
+            edit.summary == "task 2: pending -> cancelled (not needed); added 3. write the summary"
+        )
+        got = await c.call(PLAN_GET, PlanGetParams(run_id=run_id), PlanGetResult)
+        assert got.live and [t.added_by for t in got.tasks] == ["model", "model", "user"]
+        with pytest.raises(RpcError) as exc:  # a bad edit is a clear -32602, plan unchanged
+            await c.call(
+                PLAN_EDIT,
+                PlanEditParams(run_id=run_id, changes=[TaskChange(id=9, note="x")]),
+                PlanEditResult,
+            )
+        assert exc.value.code == INVALID_PARAMS and "no task 9" in exc.value.message
+        provider.resume.set()
+        events, _ = await collect(c, run_id)
+
+        assert [e.type for e in events].count("plan.notice") == 1
+        assert (
+            provider.requests[2]
+            .messages[-1]["content"][-1]["text"]
+            .startswith("[The user changed your plan")
+        )
+        with pytest.raises(RpcError) as exc:
+            await c.call(
+                PLAN_EDIT,
+                PlanEditParams(run_id=run_id, add=[NewTask(title="late")]),
+                PlanEditResult,
+            )
+        assert "not running" in exc.value.message
+
+    d2 = await daemon_factory(planned)  # restarted: the plan comes back from events.jsonl
+    async with d2.client() as c:
+        got = await c.call(PLAN_GET, PlanGetParams(run_id=run_id), PlanGetResult)
+        assert not got.live
+        assert [(t.id, t.status) for t in got.tasks] == [
+            (1, "completed"),
+            (2, "cancelled"),
+            (3, "completed"),
+        ]
+        with pytest.raises(RpcError) as exc:
+            await c.call(PLAN_GET, PlanGetParams(run_id="nope"), PlanGetResult)
+        assert "unknown run" in exc.value.message

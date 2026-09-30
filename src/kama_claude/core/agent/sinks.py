@@ -10,6 +10,7 @@ from kama_claude.core.bus.events import (
     Event,
     LLMDeltaEvent,
     LLMResponseEvent,
+    PlanNoticeEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
     RunFinishedEvent,
@@ -94,7 +95,11 @@ class ConsolePrinter:
                 ):
                     self._p(f"  {_one_line(text, 200)}")
             case PlanUpdatedEvent():
+                if event.by == "user":
+                    self._p(f"  ✎ you changed the plan: {event.summary}")
                 self._show_plan(event.tasks)
+            case PlanNoticeEvent():
+                self._p("  (the model has been told about your plan change)")
             case PlanReminderEvent():
                 n = len(event.open_task_ids)
                 self._p(f"  ! stopped with {n} open task(s); reminding the model of its plan")
@@ -135,11 +140,11 @@ class ConsolePrinter:
         if self._plan.keys() - before.keys():
             self._p(f"  plan {progress}")
             for t in tasks:
-                self._p(f"    {render_task(t)}")
+                self._p(f"    {render_task(t, tasks)}")
             return
         for t in tasks:
             if t != before.get(t.id):
-                self._p(f"  {render_task(t)}  {progress}")
+                self._p(f"  {render_task(t, tasks)}  {progress}")
 
     def _p(self, line: str) -> None:
         print(line, file=self._out, flush=True)

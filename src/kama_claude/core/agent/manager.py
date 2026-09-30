@@ -25,7 +25,7 @@ from pathlib import Path
 
 import anthropic
 
-from kama_claude.core.agent.loop import ApprovalDecision, RunResult
+from kama_claude.core.agent.loop import AgentLoop, ApprovalDecision, RunResult
 from kama_claude.core.agent.runner import (
     build_loop,
     make_provider,
@@ -44,7 +44,7 @@ from kama_claude.core.bus.events import (
 )
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.types import LLMProvider, ToolCall
-from kama_claude.core.plan import PlanTask
+from kama_claude.core.plan import NewTask, PlanError, PlanTask, TaskChange
 from kama_claude.core.trace.tracer import Tracer
 
 logger = logging.getLogger(__name__)
@@ -128,6 +128,7 @@ class RunHandle:
     task: asyncio.Task[RunResult] | None = None
     tracer: Tracer = field(default_factory=Tracer.noop)
     plan: list[PlanTask] = field(default_factory=list)  # latest plan.updated snapshot
+    loop: AgentLoop | None = None
 
     def info(self) -> RunInfo:
         return RunInfo(
@@ -226,6 +227,7 @@ class RunManager:
                 for fut in handle.pending.values():
                     fut.cancel()
 
+        handle.loop = loop
         handle.task = asyncio.create_task(drive(), name=f"run-{run_id}")
         self.runs[run_id] = handle
         return handle
@@ -258,6 +260,32 @@ class RunManager:
             return False
         handle.task.cancel()
         return True
+
+    def get_plan(self, run_id: str) -> tuple[list[PlanTask], bool]:
+        """The latest plan of a run: from memory if loaded, else from its events on disk."""
+        handle = self.runs.get(run_id)
+        if handle is not None:
+            return handle.plan, handle.task is not None and not handle.task.done()
+        path = self._find_run_file(run_id, "events.jsonl")
+        if path is None:
+            raise UnknownRun(run_id)
+        tasks: list[PlanTask] = []
+        for line in path.read_text().splitlines():
+            if '"plan.updated"' in line:
+                event = EVENT_ADAPTER.validate_json(line)
+                if isinstance(event, PlanUpdatedEvent):
+                    tasks = event.tasks
+        return tasks, False
+
+    async def edit_plan(
+        self, run_id: str, add: list[NewTask], changes: list[TaskChange]
+    ) -> tuple[list[PlanTask], str]:
+        """Apply a user edit to a live run's plan. Raises UnknownRun or PlanError."""
+        handle = self._get(run_id)
+        if handle.loop is None or handle.task is None or handle.task.done():
+            raise PlanError("the run is not running")
+        after, lines = await handle.loop.edit_plan(add, changes)
+        return after, "; ".join(lines)
 
     def tracer_for(self, run_id: str) -> Tracer | None:
         handle = self.runs.get(run_id)

@@ -17,6 +17,8 @@ uv run kama run "add a --verbose flag to cli.py and test it"   # asks before bas
 uv run kama run --detach "..."   # prints a run id; then from any terminal:
 uv run kama attach <run-id>      # replays what you missed, then streams live
 uv run kama runs                 # live runs, with plan progress (plan 3/7)
+uv run kama tui                  # full-screen: start, watch, approve, steer the plan
+uv run kama plan add <run-id> "write a summary" --after 2   # steer a live run's plan
 uv run kama trace                # where the latest run's time, tokens and money went
 KAMA_PLANNING=false uv run kama run --local "..."   # the S2 agent: no task tools
 jq -c '{seq, type, stop_reason, name}' ~/.kama/runs/<run-id>/events.jsonl

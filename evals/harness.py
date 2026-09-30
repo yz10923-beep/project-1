@@ -42,6 +42,7 @@ from kama_claude.core.bus.events import (
     LLMResponseEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
+    RunFinishedEvent,
     RunStartedEvent,
     ToolFinishedEvent,
     ToolStartedEvent,
@@ -345,6 +346,8 @@ def plan_metrics(events: list[Event]) -> dict[str, int] | None:
             and all(n in PLAN_TOOL_NAMES for n in calls)
             for e in events
         ),
+        # plan-only steps not counted against max_steps (S3 allowance)
+        "budget_credit": sum(e.budget_credit for e in events if isinstance(e, RunFinishedEvent)),
     }
 
 
@@ -595,7 +598,8 @@ def _planning_line(rows: list[dict[str, Any]]) -> str:
         f"{sum(p['open'] > 0 for p in plans)} · reminded in {len(reminded)} "
         f"(passed after reminder: {rescued}/{len(reminded)}) · task_* = "
         f"{task_calls / tool_calls:.0%} of tool calls · plan-only steps "
-        f"{sum(p['plan_only_steps'] for p in plans)}/{sum(r['steps'] for r in rows)}"
+        f"{sum(p['plan_only_steps'] for p in plans)}/{sum(r['steps'] for r in rows)} "
+        f"({sum(p.get('budget_credit', 0) for p in plans)} not counted against max_steps)"
     )
 
 
@@ -648,6 +652,9 @@ def summarize(variant_dir: Path) -> str:
     if truncated or errs:
         classes = Counter(e["class"] for e in errs)
         lines.append(f"- NOT SCORED: {truncated} truncated, errors {dict(classes)}")
+    if out_of_steps := [r for r in ok if r.get("run_status") == "max_steps"]:
+        tasks = ", ".join(sorted({r["prompt_id"] for r in out_of_steps}))
+        lines.append(f"- ended at max_steps: {len(out_of_steps)} trial(s) ({tasks})")
     if planned := [r for r in ok if r.get("plan") is not None]:
         lines.append(_planning_line(planned))
     if leaks := [r for r in ok if r["meta"].get("leak_suspect")]:
