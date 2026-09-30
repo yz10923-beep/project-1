@@ -107,3 +107,10 @@ def test_utf16_dotenv_is_a_clear_config_error(tmp_path: Path) -> None:
     p.write_bytes("ANTHROPIC_API_KEY=k\r\n".encode("utf-16"))
     with pytest.raises(ConfigError, match="UTF-8"):
         load_settings(env={}, dotenv_path=p)
+
+
+def test_planning_can_be_switched_off_for_ab_runs() -> None:
+    # The S3 eval A/B: KAMA_PLANNING=false gives the S2 agent (no task_* tools).
+    assert load_settings(env={}, use_default_dotenv=False).planning is True
+    off = load_settings(env={"KAMA_PLANNING": "false"}, use_default_dotenv=False)
+    assert off.planning is False

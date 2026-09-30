@@ -1,0 +1,9 @@
+# Planning: ten requirements spread over four files. Each is easy on its own; the
+# failure this task measures is stopping early (declaring victory with R9 or R10
+# undone) or losing track of one. check.py grades every requirement separately on
+# data the agent never sees, and the reason lists which ones failed.
+goal = """
+Implement everything in SPEC.md. The work is done when every requirement in it is met.
+"""
+tags = ["planning", "long", "finance", "positive"]
+max_steps = 40

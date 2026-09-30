@@ -59,6 +59,8 @@ class LLMResponse(BaseModel):
     content: list[dict[str, Any]] = Field(description="Raw content blocks, echoed back as-is.")
     usage: Usage = Field(default_factory=Usage)
     model: str = ""
+    # Time to first generated content (text, thinking or tool input), if measured.
+    ttft_ms: int | None = None
 
     @property
     def text(self) -> str:

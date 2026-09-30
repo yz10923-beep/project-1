@@ -26,7 +26,7 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def spawn_daemon(port: int) -> Daemon:
+def spawn_daemon(port: int, extra_env: dict[str, str] | None = None) -> Daemon:
     state = Path(tempfile.mkdtemp(prefix="kama-daemon-"))
     env = {
         **os.environ,
@@ -34,6 +34,7 @@ def spawn_daemon(port: int) -> Daemon:
         "KAMA_LOG_LEVEL": "INFO",
         "KAMA_TOKEN_FILE": str(state / "core.token"),
         "KAMA_RUNS_DIR": str(state / "runs"),
+        **(extra_env or {}),
     }
     proc = subprocess.Popen(
         [sys.executable, "-m", "kama_claude.core"],

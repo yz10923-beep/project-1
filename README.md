@@ -4,7 +4,7 @@ A mini local coding-agent runtime in Python, built stage by stage after
 [KamaClaude](https://github.com/youngyangyang04/KamaClaude) (MIT). A `kama-core` daemon
 owns agent state; the `kama` CLI talks to it over JSON-RPC 2.0 / NDJSON on TCP.
 
-Status: **S2**. Runs execute in the `kama-core` daemon; `kama run` / `attach` stream them live over JSON-RPC, and any client can answer approval prompts. See [docs/ROADMAP.md](docs/ROADMAP.md).
+Status: **S3**. Runs execute in the `kama-core` daemon; `kama run` / `attach` stream them live over JSON-RPC, and any client can answer approval prompts. The agent plans with task tools, and you watch the checklist being worked through; every run is traced (`kama trace`). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash
 uv sync
@@ -16,6 +16,9 @@ mkdir -p ~/.kama && echo 'ANTHROPIC_API_KEY=sk-ant-...' > ~/.kama/.env && chmod 
 uv run kama run "add a --verbose flag to cli.py and test it"   # asks before bash/write_file
 uv run kama run --detach "..."   # prints a run id; then from any terminal:
 uv run kama attach <run-id>      # replays what you missed, then streams live
+uv run kama runs                 # live runs, with plan progress (plan 3/7)
+uv run kama trace                # where the latest run's time, tokens and money went
+KAMA_PLANNING=false uv run kama run --local "..."   # the S2 agent: no task tools
 jq -c '{seq, type, stop_reason, name}' ~/.kama/runs/<run-id>/events.jsonl
 ```
 

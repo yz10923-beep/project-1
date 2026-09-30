@@ -99,6 +99,8 @@ class RunInfo(BaseModel):
     workspace: str
     started_at: datetime
     pending_approvals: int
+    plan_done: int | None = Field(default=None, description="Completed tasks; None: no plan.")
+    plan_total: int | None = None
 
 
 class RunListResult(BaseModel):

@@ -37,6 +37,8 @@ class Settings(BaseModel):
     max_steps: int = Field(default=30, ge=1)
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     refusal_fallback: bool = True
+    # S3: offer the task_* tools and nudge the model when it stops with open tasks.
+    planning: bool = True
     # Outside any workspace, so the agent never reads its own (or other runs') logs.
     runs_dir: Path = Path("~/.kama/runs")
     anthropic_api_key: SecretStr | None = None

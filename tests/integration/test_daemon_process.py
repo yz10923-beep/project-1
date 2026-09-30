@@ -64,3 +64,45 @@ def test_sigterm_shuts_down_cleanly() -> None:
     d = spawn_daemon(free_port())
     d.proc.send_signal(signal.SIGTERM)
     assert d.proc.wait(timeout=5) == 0
+
+
+def test_planned_run_end_to_end_through_the_real_sdk(tmp_path: Path) -> None:
+    """S3 through every real layer: CLI -> daemon -> anthropic SDK -> HTTP/SSE (a fake
+    Messages API) and back. The scripted model plans, stops early, is reminded, and
+    finishes; the CLI shows the checklist, `runs` the progress, `trace` the cost."""
+    api_port = free_port()
+    api = subprocess.Popen(
+        [sys.executable, "scripts/fake_api.py", str(api_port)],
+        env={**os.environ, "FAKE_API_FAST": "1"},
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert api.stdout is not None and "listening" in api.stdout.readline()
+    d = spawn_daemon(
+        free_port(),
+        {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{api_port}", "ANTHROPIC_API_KEY": "fake"},
+    )
+    try:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
+        assert out.returncode == 0, out.stderr
+        for line in (
+            "  plan (0/2)",
+            "    [ ] 2. Report it",
+            "  [x] 1. Check the Python version  (1/2)",
+            "  ! stopped with 1 open task(s); reminding the model of its plan",
+            "plan: 2/2 completed · 0 cancelled · 0 open",
+        ):
+            assert line in out.stdout.splitlines(), (line, out.stdout)
+        runs = run_cli("runs", env=d.env)
+        assert "· plan 2/2" in runs.stdout
+        trace = run_cli("trace", env={**d.env})
+        assert trace.returncode == 0, trace.stderr
+        assert "plan    2 tasks · 2 completed" in trace.stdout
+        assert "3 of 6 steps only updated the plan" in trace.stdout  # 1 (create), 3, 5
+    finally:
+        d.proc.terminate()
+        d.proc.wait(timeout=5)
+        api.terminate()
+        api.wait(timeout=5)

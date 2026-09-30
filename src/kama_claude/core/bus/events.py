@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, TypeAdapter
 
 from kama_claude.core.llm.types import StopReason, Usage
+from kama_claude.core.plan import PlanTask
 
 
 class CoreStartedEvent(BaseModel):
@@ -41,6 +42,7 @@ class RunStartedEvent(_RunEvent):
     model: str
     workspace: str
     max_steps: int
+    planning: bool = Field(default=False, description="task_* tools offered (S3+).")
 
 
 class LLMResponseEvent(_RunEvent):
@@ -51,6 +53,7 @@ class LLMResponseEvent(_RunEvent):
     usage: Usage
     latency_ms: int
     model: str = Field(default="", description="Model that served this call, from the response.")
+    ttft_ms: int | None = Field(default=None, description="Time to first generated token.")
 
 
 class ToolStartedEvent(_RunEvent):
@@ -99,6 +102,27 @@ class ToolFinishedEvent(_RunEvent):
     approval_ms: int = Field(default=0, description="Time spent waiting for the user.")
 
 
+class PlanUpdatedEvent(_RunEvent):
+    """The whole plan after a task_* call changed it. A snapshot, not a diff: a client
+    that attaches late needs only the latest one, and replaying one twice is harmless."""
+
+    type: Literal["plan.updated"] = "plan.updated"
+    step: int
+    tool_use_id: str
+    tasks: list[PlanTask]
+
+
+class PlanReminderEvent(_RunEvent):
+    """The model ended its turn with open tasks, so the loop sent `text` back as a user
+    message instead of finishing (once per run). Durable, because it is part of the
+    conversation: without it events.jsonl could not reconstruct what the model saw."""
+
+    type: Literal["plan.reminder"] = "plan.reminder"
+    step: int
+    open_task_ids: list[int]
+    text: str
+
+
 RunStatus = Literal["completed", "max_steps", "truncated", "refused", "error", "cancelled"]
 
 
@@ -122,6 +146,8 @@ Event = Annotated[
     | ToolApprovalRequestedEvent
     | ToolApprovalResolvedEvent
     | ToolFinishedEvent
+    | PlanUpdatedEvent
+    | PlanReminderEvent
     | RunFinishedEvent
     | LLMDeltaEvent,
     Field(discriminator="type"),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -88,3 +89,27 @@ async def test_attach_answers_approvals_from_a_second_terminal(
         finished = await asyncio.wait_for(cli.watch(client, run_id, 0, approve), 10)
     assert finished is not None and finished.status == "completed"
     assert (ws / "hello.txt").read_text() == "hi"
+
+
+async def test_kama_trace_reports_the_latest_run(
+    core: Any, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _, settings, ws = core
+    assert await cli._run(settings, run_args(ws, yes=True)) == cli.EXIT_OK
+    await asyncio.sleep(0.05)
+    capsys.readouterr()
+    args = argparse.Namespace(run_id=None, chrome=None, width=30)
+    assert cli._trace(settings, args) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "where the time went" in out and "tool write_file" in out
+    assert "event bus" in out and "ipc requests" in out
+    chrome = tmp_path / "t.json"
+    args = argparse.Namespace(run_id=None, chrome=str(chrome), width=30)
+    assert cli._trace(settings, args) == cli.EXIT_OK
+    assert json.loads(chrome.read_text())["traceEvents"]
+
+
+def test_kama_trace_unknown_run_is_a_usage_error(core: Any) -> None:
+    _, settings, _ = core
+    args = argparse.Namespace(run_id="nope", chrome=None, width=30)
+    assert cli._trace(settings, args) == cli.EXIT_USAGE

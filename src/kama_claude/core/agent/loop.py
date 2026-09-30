@@ -7,6 +7,14 @@ Invariants:
   single user message (splitting them teaches the model to stop calling tools in parallel).
 - Every run emits run.started first and run.finished last, including on API errors,
   internal bugs and cancellation.
+
+Tracing: the loop opens one span per run, step, model call and tool (with approval and
+execution as children), so a trace shows where the time and tokens went.
+
+Planning (S3): each run gets a fresh Plan that only the task_* tools change. After a
+tool changes it the loop emits plan.updated (a snapshot), and if the model ends its turn
+with open tasks it is reminded once instead of the run finishing: the plan turns
+"stopped early" from invisible into something the runtime can detect.
 """
 
 from __future__ import annotations
@@ -15,7 +23,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +33,8 @@ from kama_claude.core.agent.sinks import EventSink
 from kama_claude.core.bus.events import (
     LLMDeltaEvent,
     LLMResponseEvent,
+    PlanReminderEvent,
+    PlanUpdatedEvent,
     RunFinishedEvent,
     RunStartedEvent,
     RunStatus,
@@ -33,9 +43,12 @@ from kama_claude.core.bus.events import (
     ToolFinishedEvent,
     ToolStartedEvent,
 )
+from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import LLMError, LLMProvider, Message, ToolCall, Usage
+from kama_claude.core.plan import PLAN_TOOL_NAMES, Plan, PlanTask, render_task
 from kama_claude.core.tools.base import ToolContext, ToolResult
 from kama_claude.core.tools.registry import ToolRegistry
+from kama_claude.core.trace.tracer import Tracer
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +65,20 @@ type Approver = Callable[[ToolCall], Awaitable[bool | ApprovalDecision]]
 
 DENIED_MESSAGE = "The user denied this tool call. Do not retry it; choose another approach or stop."
 
+# One reminder is enough to catch an early stop; more would fight a model that has a
+# good reason to stop (blocked, needs the user) and could loop until max_steps.
+MAX_PLAN_REMINDERS = 1
+
+
+def plan_reminder(open_tasks: list[PlanTask]) -> str:
+    lines = "\n".join(render_task(t) for t in open_tasks)
+    return (
+        "You ended your turn, but your plan still has unfinished tasks:\n"
+        f"{lines}\n\n"
+        "Continue with them. If a task is no longer needed, cancel it with a reason; if "
+        "you are blocked and need the user, say so. Then give your final answer."
+    )
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -62,6 +89,31 @@ class RunResult:
     usage: Usage
     error: str | None = None
     retryable: bool | None = None  # set when the run failed on an LLM API error
+
+
+@dataclass
+class _RunState:
+    steps: int = 0
+    usage: Usage = field(default_factory=Usage)
+    plan_reminders: int = 0
+
+
+@dataclass(frozen=True)
+class _Finish:
+    """Returned by a step that ends the run."""
+
+    status: RunStatus
+    text: str = ""
+    error: str | None = None
+    retryable: bool | None = None
+
+
+@dataclass(frozen=True)
+class _ToolOutcome:
+    result: ToolResult
+    denied: bool
+    approval_ms: int
+    duration_ms: int
 
 
 def _ms_since(t0: float) -> int:
@@ -78,6 +130,7 @@ class AgentLoop:
         workspace: Path,
         approver: Approver,
         max_steps: int = 30,
+        tracer: Tracer | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -85,7 +138,11 @@ class AgentLoop:
         self._ctx = ToolContext(workspace=workspace.resolve())
         self._approver = approver
         self._max_steps = max_steps
+        self._tracer = tracer or Tracer.noop()
         self._seq = 0
+        # The system prompt only mentions planning when the tools are really there.
+        self._planning = all(registry.get(n) is not None for n in PLAN_TOOL_NAMES)
+        self._state = _RunState()
 
     def _meta(self, run_id: str) -> dict[str, Any]:
         meta = {"run_id": run_id, "seq": self._seq, "at": datetime.now(UTC)}
@@ -93,10 +150,24 @@ class AgentLoop:
         return meta
 
     async def run(self, goal: str, run_id: str) -> RunResult:
+        with self._tracer.span("run", "agent", model=self._provider.model) as span:
+            result = await self._run(goal, run_id)
+            span.set(status=result.status, steps=result.steps, **result.usage.model_dump())
+            if self._planning:
+                counts = self._ctx.plan.counts()
+                span.set(
+                    **{f"plan_{k}": v for k, v in counts.items()},
+                    plan_reminders=self._state.plan_reminders,
+                )
+            if result.status != "completed":
+                span.fail(result.error or result.status)
+            return result
+
+    async def _run(self, goal: str, run_id: str) -> RunResult:
         t0 = time.monotonic()
         self._seq = 0
-        usage = Usage()
-        steps = 0
+        self._ctx = ToolContext(workspace=self._ctx.workspace, plan=Plan())
+        state = self._state = _RunState()
         await self._sink.emit(
             RunStartedEvent(
                 **self._meta(run_id),
@@ -104,6 +175,7 @@ class AgentLoop:
                 model=self._provider.model,
                 workspace=str(self._ctx.workspace),
                 max_steps=self._max_steps,
+                planning=self._planning,
             )
         )
 
@@ -118,68 +190,28 @@ class AgentLoop:
                     **self._meta(run_id),
                     status=status,
                     final_text=text,
-                    steps=steps,
-                    usage=usage,
+                    steps=state.steps,
+                    usage=state.usage,
                     duration_ms=_ms_since(t0),
                     error=error,
                     retryable=retryable,
                 )
             )
-            return RunResult(run_id, status, text, steps, usage, error, retryable)
+            return RunResult(run_id, status, text, state.steps, state.usage, error, retryable)
 
-        system = system_prompt(self._ctx.workspace)
+        system = system_prompt(self._ctx.workspace, planning=self._planning)
         tools = self._registry.specs()
         messages: list[Message] = [{"role": "user", "content": goal}]
 
         try:
-            while steps < self._max_steps:
-                steps += 1
-                t_llm = time.monotonic()
-
-                # Bound as a default: a closure over `steps` would see later values.
-                async def on_text(text: str, step: int = steps) -> None:
-                    await self._sink.emit(LLMDeltaEvent(run_id=run_id, step=step, text=text))
-
-                try:
-                    resp = await self._provider.complete(
-                        system=system, messages=messages, tools=tools, on_text=on_text
+            while state.steps < self._max_steps:
+                state.steps += 1
+                with self._tracer.span(f"step {state.steps}", "agent", step=state.steps):
+                    outcome = await self._step(run_id, state, system, tools, messages)
+                if outcome is not None:
+                    return await finish(
+                        outcome.status, outcome.text, outcome.error, outcome.retryable
                     )
-                except LLMError as e:
-                    return await finish("error", error=str(e), retryable=e.retryable)
-                usage = usage + resp.usage
-                await self._sink.emit(
-                    LLMResponseEvent(
-                        **self._meta(run_id),
-                        step=steps,
-                        stop_reason=resp.stop_reason,
-                        content=resp.content,
-                        usage=resp.usage,
-                        latency_ms=_ms_since(t_llm),
-                        model=resp.model,
-                    )
-                )
-                messages.append({"role": "assistant", "content": resp.content})
-
-                match resp.stop_reason:
-                    case "end_turn" | "stop_sequence":
-                        return await finish("completed", resp.text)
-                    case "tool_use":
-                        calls = resp.tool_calls
-                        if not calls:
-                            return await finish("error", error="stop_reason=tool_use without calls")
-                        results = [await self._run_tool(run_id, steps, c) for c in calls]
-                        messages.append({"role": "user", "content": results})
-                    case "pause_turn":
-                        # Server-side tool paused mid-turn; resending the history resumes it.
-                        continue
-                    case "max_tokens":
-                        return await finish("truncated", resp.text, "response hit max_tokens")
-                    case "refusal":
-                        return await finish("refused", resp.text, "model declined the request")
-                    case _:
-                        return await finish(
-                            "error", resp.text, f"unexpected stop_reason: {resp.stop_reason}"
-                        )
             return await finish("max_steps", error=f"no final answer after {self._max_steps} steps")
         except asyncio.CancelledError:
             await finish("cancelled", error="run was cancelled")
@@ -189,6 +221,94 @@ class AgentLoop:
             # without run.finished; the traceback goes to the log.
             logger.exception("run %s crashed", run_id)
             return await finish("error", error=f"internal error: {type(e).__name__}: {e}")
+
+    async def _step(
+        self,
+        run_id: str,
+        state: _RunState,
+        system: str,
+        tools: list[dict[str, Any]],
+        messages: list[Message],
+    ) -> _Finish | None:
+        """One model call plus the tools it asks for. Returns _Finish to end the run."""
+        step = state.steps
+
+        async def on_text(text: str) -> None:
+            await self._sink.emit(LLMDeltaEvent(run_id=run_id, step=step, text=text))
+
+        t_llm = time.monotonic()
+        with self._tracer.span("llm.call", "llm", step=step) as llm_span:
+            try:
+                resp = await self._provider.complete(
+                    system=system, messages=messages, tools=tools, on_text=on_text
+                )
+            except LLMError as e:
+                llm_span.fail(str(e))
+                return _Finish("error", error=str(e), retryable=e.retryable)
+            usage = resp.usage.model_dump()
+            llm_span.set(
+                model=resp.model,
+                stop_reason=resp.stop_reason,
+                ttft_ms=resp.ttft_ms,
+                cost_usd=cost_usd(resp.model, usage),
+                **usage,
+            )
+        state.usage = state.usage + resp.usage
+        await self._sink.emit(
+            LLMResponseEvent(
+                **self._meta(run_id),
+                step=step,
+                stop_reason=resp.stop_reason,
+                content=resp.content,
+                usage=resp.usage,
+                latency_ms=_ms_since(t_llm),
+                model=resp.model,
+                ttft_ms=resp.ttft_ms,
+            )
+        )
+        messages.append({"role": "assistant", "content": resp.content})
+
+        match resp.stop_reason:
+            case "end_turn" | "stop_sequence":
+                if await self._remind_open_tasks(run_id, state, messages):
+                    return None
+                return _Finish("completed", resp.text)
+            case "tool_use":
+                calls = resp.tool_calls
+                if not calls:
+                    return _Finish("error", error="stop_reason=tool_use without calls")
+                results = [await self._run_tool(run_id, step, c) for c in calls]
+                messages.append({"role": "user", "content": results})
+                return None
+            case "pause_turn":
+                # Server-side tool paused mid-turn; resending the history resumes it.
+                return None
+            case "max_tokens":
+                return _Finish("truncated", resp.text, "response hit max_tokens")
+            case "refusal":
+                return _Finish("refused", resp.text, "model declined the request")
+            case _:
+                return _Finish("error", resp.text, f"unexpected stop_reason: {resp.stop_reason}")
+
+    async def _remind_open_tasks(
+        self, run_id: str, state: _RunState, messages: list[Message]
+    ) -> bool:
+        """If the model stopped with open tasks, send it the plan back (once). True if sent."""
+        open_tasks = self._ctx.plan.open_tasks()
+        if not open_tasks or state.plan_reminders >= MAX_PLAN_REMINDERS:
+            return False
+        state.plan_reminders += 1
+        text = plan_reminder(open_tasks)
+        await self._sink.emit(
+            PlanReminderEvent(
+                **self._meta(run_id),
+                step=state.steps,
+                open_task_ids=[t.id for t in open_tasks],
+                text=text,
+            )
+        )
+        messages.append({"role": "user", "content": text})
+        return True
 
     async def _run_tool(self, run_id: str, step: int, call: ToolCall) -> dict[str, Any]:
         """Execute one tool call and return its tool_result block. Never raises (except cancel)."""
@@ -201,11 +321,44 @@ class AgentLoop:
                 input=call.input,
             )
         )
+        plan_version = self._ctx.plan.version
+        with self._tracer.span(f"tool {call.name}", "tool", tool=call.name) as span:
+            out = await self._approve_and_execute(run_id, step, call)
+            span.set(denied=out.denied, output_chars=len(out.result.content))
+            if out.result.is_error:
+                span.fail("denied" if out.denied else out.result.content[:200])
+        if self._ctx.plan.version != plan_version:
+            await self._sink.emit(
+                PlanUpdatedEvent(
+                    **self._meta(run_id), step=step, tool_use_id=call.id, tasks=self._ctx.plan.tasks
+                )
+            )
+        await self._sink.emit(
+            ToolFinishedEvent(
+                **self._meta(run_id),
+                step=step,
+                tool_use_id=call.id,
+                name=call.name,
+                is_error=out.result.is_error,
+                denied=out.denied,
+                output=out.result.content,
+                duration_ms=out.duration_ms,
+                approval_ms=out.approval_ms,
+            )
+        )
+        block: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": call.id,
+            "content": out.result.content,
+        }
+        if out.result.is_error:
+            block["is_error"] = True
+        return block
+
+    async def _approve_and_execute(self, run_id: str, step: int, call: ToolCall) -> _ToolOutcome:
         # Human wait and tool execution are timed separately: mixing them makes tool
         # latency and trajectory-efficiency numbers meaningless.
         approval_ms = 0
-        duration_ms = 0
-        denied = False
         tool = self._registry.get(call.name)
         if tool is not None and tool.requires_approval:
             await self._sink.emit(
@@ -218,12 +371,15 @@ class AgentLoop:
                 )
             )
             t_wait = time.monotonic()
-            answer = await self._approver(call)
+            with self._tracer.span("tool.approval", "tool") as approval_span:
+                answer = await self._approver(call)
+                decision = (
+                    answer
+                    if isinstance(answer, ApprovalDecision)
+                    else ApprovalDecision(answer, "user")
+                )
+                approval_span.set(approved=decision.approved, by=decision.by)
             approval_ms = _ms_since(t_wait)
-            decision = (
-                answer if isinstance(answer, ApprovalDecision) else ApprovalDecision(answer, "user")
-            )
-            denied = not decision.approved
             await self._sink.emit(
                 ToolApprovalResolvedEvent(
                     **self._meta(run_id),
@@ -233,30 +389,9 @@ class AgentLoop:
                     by=decision.by,
                 )
             )
-        if denied:
-            result = ToolResult(DENIED_MESSAGE, is_error=True)
-        else:
-            t_exec = time.monotonic()
+            if not decision.approved:
+                return _ToolOutcome(ToolResult(DENIED_MESSAGE, is_error=True), True, approval_ms, 0)
+        t_exec = time.monotonic()
+        with self._tracer.span("tool.exec", "tool"):
             result = await self._registry.execute(call.name, call.input, self._ctx)
-            duration_ms = _ms_since(t_exec)
-        await self._sink.emit(
-            ToolFinishedEvent(
-                **self._meta(run_id),
-                step=step,
-                tool_use_id=call.id,
-                name=call.name,
-                is_error=result.is_error,
-                denied=denied,
-                output=result.content,
-                duration_ms=duration_ms,
-                approval_ms=approval_ms,
-            )
-        )
-        block: dict[str, Any] = {
-            "type": "tool_result",
-            "tool_use_id": call.id,
-            "content": result.content,
-        }
-        if result.is_error:
-            block["is_error"] = True
-        return block
+        return _ToolOutcome(result, False, approval_ms, _ms_since(t_exec))

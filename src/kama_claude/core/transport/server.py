@@ -17,7 +17,9 @@ import asyncio
 import json
 import logging
 import secrets
+import time
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -101,6 +103,8 @@ class JsonRpcServer:
         self._routes: dict[str, _Route] = {}
         self._server: asyncio.Server | None = None
         self._connections: set[asyncio.Task[None]] = set()
+        # Called after each request is answered (used for IPC tracing).
+        self.on_request: Callable[[RpcRecord], None] | None = None
         self.register(HELLO, HelloParams, self._hello)
 
     def register[P: BaseModel](
@@ -169,7 +173,42 @@ class JsonRpcServer:
                 return
             if not line.strip():
                 continue
-            await conn.send(await self._dispatch(line, conn))
+            start_ns, t0 = time.time_ns(), time.perf_counter_ns()
+            response = await self._dispatch(line, conn)
+            await conn.send(response)
+            if self.on_request is not None:
+                self._report(line, response, conn, start_ns, time.perf_counter_ns() - t0)
+
+    def _report(
+        self,
+        line: bytes,
+        response: JsonRpcSuccess | JsonRpcError,
+        conn: Connection,
+        start_ns: int,
+        duration_ns: int,
+    ) -> None:
+        """Hand a finished request to the tracing hook. Never breaks the connection."""
+        assert self.on_request is not None
+        try:
+            raw = json.loads(line)
+            raw = raw if isinstance(raw, dict) else {}
+        except json.JSONDecodeError:
+            raw = {}
+        maybe = raw.get("params")
+        params: dict[str, Any] = maybe if isinstance(maybe, dict) else {}
+        record = RpcRecord(
+            method=str(raw.get("method", "?")),
+            client=conn.client,
+            start_ns=start_ns,
+            duration_ns=duration_ns,
+            error_code=response.error.code if isinstance(response, JsonRpcError) else None,
+            params={k: v for k, v in params.items() if k != "token"},  # never log secrets
+            result=response.result if isinstance(response, JsonRpcSuccess) else None,
+        )
+        try:
+            self.on_request(record)
+        except Exception:
+            logger.exception("request hook failed")
 
     async def _dispatch(self, line: bytes, conn: Connection) -> JsonRpcSuccess | JsonRpcError:
         """Turn one request line into exactly one response. Never raises."""
@@ -209,6 +248,19 @@ class JsonRpcServer:
             return make_error(req.id, INTERNAL_ERROR, "Internal error")
 
         return JsonRpcSuccess(id=req.id, result=result.model_dump(mode="json"))
+
+
+@dataclass(frozen=True)
+class RpcRecord:
+    """One answered request, as seen by the server."""
+
+    method: str
+    client: str
+    start_ns: int
+    duration_ns: int
+    error_code: int | None
+    params: dict[str, Any]
+    result: Any
 
 
 class RequestError(Exception):

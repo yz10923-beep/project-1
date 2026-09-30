@@ -9,8 +9,8 @@ the demo command works, not "the code is written".
 | **S0** ✅ | CLI ↔ daemon over JSON-RPC 2.0 / NDJSON / TCP; typed protocol; config | `kama ping` returns pong from a separately running `kama-core`; error codes tested | Process boundaries, wire contracts, asyncio streams |
 | **S1** ✅ | `kama run "<goal>"`: agent loop (LLM → tool_use → tool_result → …) with read_file / list_dir / write_file / bash; every step appended to `runs/<id>/events.jsonl` | A real goal completes end to end; loop unit-tested against a scripted fake LLM | Raw Messages API mechanics: tool schemas, stop reasons, message assembly |
 | **S2** ✅ | Move the runner into the daemon; clients subscribe to an event stream over IPC | Two clients watch the same run live; client crash doesn't kill the run | Pub/sub, backpressure, cancellation in asyncio |
-| **Trace** | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
-| **S3** | Task tools (create/update/list) so the model plans; TUI | A multi-step goal shows a visible plan being executed | Planning as tools, not prompts |
+| **Trace** ✅ | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
+| **S3** ✅ | Task tools (create/update/list) so the model plans; ~~TUI~~ (cut, see S3 notes) | A multi-step goal shows a visible plan being executed; the eval A/B says whether planning helps | Planning as tools, not prompts |
 | **S4** | Sessions: multiple runs share a thread; notes as durable memory | Run 2 uses a fact learned in run 1 without re-reading it | Memory tiers: working context vs. durable notes |
 | **S5** | Tool safety: param validation, permission policy + approval flow, failure classification, retry | A denied `bash rm` is blocked and the model recovers; transient errors retry, permanent don't | Failure handling for agents |
 | **S6** | Context governance: token budget, tool_result truncation, compaction | A long session stays under budget with measured quality loss | Context engineering, token accounting |
@@ -69,7 +69,130 @@ Bugs found while building (all have tests now):
 Still open: token counts / latency per span are in events but there's no trace view yet
 (next: Trace). The eval harness still runs in-process via `run_goal`.
 
+## Trace notes
+
+Built: a hand-rolled tracer (same data model as OpenTelemetry / Langfuse / LangSmith),
+spans across three layers (LLM, agent + event bus, IPC), `kama trace` (breakdown,
+tokens, cache hit, cost, waterfall, slowest spans, per-client delivery lag, per-method
+IPC latency) and a Perfetto export.
+
+Design choices worth defending:
+- **Spans vs events.** Events record what happened (for replay); spans record how long
+  each part took and inside what (for performance). Same run, two questions, two files.
+- **ContextVar for parent links.** A global "current span" breaks as soon as two asyncio
+  tasks run concurrently; each task gets its own context copy, so a task created inside
+  a span still sees the right parent and siblings never nest.
+- **Wall-clock start, monotonic duration.** Wall-clock places spans on a timeline;
+  monotonic durations can't go negative when NTP adjusts the clock.
+- **TTFT measured in the provider, at the first content delta** (not message_start,
+  which arrives before generation). TTFT separates "slow to start" from "wrote a lot";
+  tokens/s is computed over generation time only.
+- **Pure analysis.** `summarize()` takes spans and returns numbers, so its maths is tested
+  with hand-made spans and exact values; rendering is separate.
+- **Cross-trace links.** A run started from an IPC request is linked to it
+  (`linked_span`) instead of parented, so each trace file stands alone.
+- **Unknown cost is None, not $0.** A zero cost looks like data and hides a missing price.
+
+What the trace found (the point of building it):
+- `run.start` took 83 ms. Measured the cause: constructing an Anthropic SDK client costs
+  50-80 ms, and the daemon built one per run (also losing the connection pool, so each
+  run's first call paid a TLS handshake). Fix: one shared client per API key, built at
+  startup. Result: 79.7 ms -> 0.94 ms, and 2.7 ms on the first run after a restart.
+
+Bugs found by the new tests:
+- Subscription spans recorded the client as `?`: the client name was never passed
+  through. The test asserting both client names caught it.
+- `Tracer.record(**attrs)` let an attribute dict collide with named parameters
+  (`error`, `parent_id`); mypy flagged it. It now takes an explicit `attrs=` mapping.
+
+Still open: spans stay local (JSONL). Exporting to Langfuse/OTLP is a thin adapter over
+the same Span model when it's needed; the eval harness could record per-trial TTFT.
+
+## S3 notes
+
+Built: a per-run `Plan` (state) and `task_create` / `task_update` / `task_list` tools;
+`plan.updated` (snapshot) and `plan.reminder` events; a one-time reminder when the model
+ends its turn with open tasks; a live checklist in the CLI, progress in `kama runs`,
+a plan line in `kama trace`, plan metrics in every eval row; `KAMA_PLANNING=false`
+for A/B runs; a new eval task, `risk-report-spec` (ten requirements, graded one by one).
+
+Method, as in S1: the eval task came first (what "done" means), then plan state,
+tools, loop, daemon, CLI, trace, harness, each with scripted-fake tests before the
+next layer; then real processes against `scripts/fake_api.py` (now an automated
+integration test); then these notes.
+
+Design choices worth defending:
+- **Planning as tools, not prompts.** "Think step by step and make a plan" puts the plan
+  in prose that scrolls away and that nothing can check. As tool calls, the plan is
+  state: the runtime can show it, persist it, and act on it.
+- **CRUD by id instead of rewriting the whole list** (Claude Code's TodoWrite rewrites
+  it). An update costs a few tokens instead of the whole list, and a task can't silently
+  vanish: dropping one means `cancelled` with a reason, which leaves an audit trail.
+  Trade-off: more calls than one rewrite, and ids to get right (a wrong id is an
+  `is_error` result listing the valid ones).
+- **Every task_* result echoes the whole plan**, so the latest thing the model read
+  about its plan is always current.
+- **Events carry a snapshot, not a diff.** A client attaching late needs only the last
+  one, and replaying one twice is harmless. The CLI computes the diff for display.
+- **The reminder is the payoff of plan-as-state.** Stopping early (the `two-bugs` and
+  `stopped-early` failure) is invisible in a transcript until a grader catches it; with
+  a plan, "ended the turn with open tasks" is a check the runtime can make for free. It
+  fires **once**: a model with a real reason to stop (blocked, needs the user) is not
+  forced on, and it can't loop to max_steps. It's a durable event because it is part of
+  the conversation: without it events.jsonl could not rebuild what the model saw (tested).
+- **Planning off = the S2 agent, byte for byte** (same prompt, no task tools; tested).
+  An A/B that changes more than one thing measures nothing.
+- **No approval for task_* tools**: pure bookkeeping inside the run.
+
+What the trace showed (scripted fake, so it proves the metric, not the behaviour):
+- Planning has a cost the pass rate won't show: 3 of 6 model calls did nothing but
+  update the plan (~36% of wall time), and those steps count against `max_steps`. Both
+  `kama trace` and the eval summary now report "plan-only steps", so the real A/B
+  measures the cost next to the benefit.
+
+Bugs found by the tests (all in my tests, which is worth saying honestly):
+- A version-counter assertion off by one, a console assertion that depended on timing
+  (`0ms`), and an integration expectation that forgot plan creation is itself a plan-only
+  step. The last one is a definition question: creating the plan is part of its cost.
+- A daemon test used a fixed `sleep` to "let the replay arrive". It was unnecessary:
+  replay + live has no gap whenever the subscription lands, so the sleep was removed
+  (the repo rule is readiness signals, never fixed sleeps).
+
+Cut: **the TUI.** The roadmap timeboxed it, and it teaches nothing the CLI checklist
+doesn't; it would be a second thin client on the same protocol, i.e. more of S2. The
+time goes to the measurement instead. Revisit only if a demo needs it.
+
+Still open: **the paid A/B** (below) decides whether planning stays on by default.
+Other ideas, only if the numbers say so: count plan-only steps outside `max_steps`,
+or let `task_update` accept several ids at once to cut bookkeeping round-trips.
+
+### The S3 experiment (run on the VM; costs money)
+
+```bash
+uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s3-plan
+KAMA_PLANNING=false uv run python -m evals.run_evals run --reps 3 --variant s3-noplan
+uv run python -m evals.run_evals summary --variant s3-plan
+uv run python -m evals.run_evals summary --variant s3-noplan
+# the same pair with --model claude-haiku-4-5 (variants s3-plan-haiku / s3-noplan-haiku)
+```
+
+Read, in this order: pass rate with its CI (differences inside the noise floor are not
+real), `risk-report-spec` per-requirement reasons, the planning line (plans made, open
+at end, "passed after reminder", plan-only steps), then steps/tokens/cost per trial.
+Watch for `max_steps` endings on the short-budget tasks (`two-bugs` has 15): planning
+spends steps.
+
 ## Interview talking points
+
+### S3
+- "How does your agent plan?" Tools, not prompts: the plan is state the runtime can
+  check. The concrete payoff: detecting "said done with work open" and reminding once.
+- The design trade-off: CRUD-by-id vs. TodoWrite-style full rewrite (tokens per update,
+  silent drops, number of calls).
+- The measurement: an A/B where the only difference is the planning switch, an eval
+  task that grades ten requirements separately, and a cost metric (plan-only steps)
+  next to the benefit metric. "Planning didn't help Opus but helped Haiku" or "didn't
+  help at all" are both fine answers when you can show the numbers.
 
 ### S1
 - "Walk me through your agent loop": the stop-reason state machine above, the append-only
