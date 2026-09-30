@@ -10,7 +10,7 @@ the demo command works, not "the code is written".
 | **S1** ✅ | `kama run "<goal>"`: agent loop (LLM → tool_use → tool_result → …) with read_file / list_dir / write_file / bash; every step appended to `runs/<id>/events.jsonl` | A real goal completes end to end; loop unit-tested against a scripted fake LLM | Raw Messages API mechanics: tool schemas, stop reasons, message assembly |
 | **S2** ✅ | Move the runner into the daemon; clients subscribe to an event stream over IPC | Two clients watch the same run live; client crash doesn't kill the run | Pub/sub, backpressure, cancellation in asyncio |
 | **Trace** ✅ | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
-| **S3** | Task tools (create/update/get/list, dependencies) so the model plans; the user can steer the plan; TUI | A multi-step goal shows a visible plan being executed, in the CLI and the TUI; the eval A/B says whether planning helps | Planning as tools, not prompts; a real frontend over the protocol |
+| **S3** ✅ | Task tools (create/update/get/list, dependencies) so the model plans; the user can steer the plan; TUI | A multi-step goal shows a visible plan being executed, in the CLI and the TUI; the eval A/B says whether planning helps | Planning as tools, not prompts; a real frontend over the protocol |
 | **S4** | Sessions: multiple runs share a thread; notes as durable memory | Run 2 uses a fact learned in run 1 without re-reading it | Memory tiers: working context vs. durable notes |
 | **S5** | Tool safety: param validation, permission policy + approval flow, failure classification, retry | A denied `bash rm` is blocked and the model recovers; transient errors retry, permanent don't | Failure handling for agents |
 | **S6** | Context governance: token budget, tool_result truncation, compaction | A long session stays under budget with measured quality loss | Context engineering, token accounting |
@@ -109,89 +109,101 @@ the same Span model when it's needed; the eval harness could record per-trial TT
 
 ## S3 notes
 
-Built: a per-run `Plan` (state) and `task_create` / `task_update` / `task_list` tools;
-`plan.updated` (snapshot) and `plan.reminder` events; a one-time reminder when the model
-ends its turn with open tasks; a live checklist in the CLI, progress in `kama runs`,
-a plan line in `kama trace`, plan metrics in every eval row; `KAMA_PLANNING=false`
-for A/B runs; a new eval task, `risk-report-spec` (ten requirements, graded one by one).
+Built (full version):
+- **Plan as state:** a per-run task DAG (`blocked_by`, cycle-checked; a task can't start or
+  complete while a blocker is open), descriptions, timestamps; tools `task_create`,
+  `task_update` (batched, all-or-nothing, applied in order), `task_get`, `task_list`.
+- **Runtime behaviour on top of it:** `plan.updated` snapshots, one `plan.reminder` when
+  the model stops with open tasks, and a step allowance: plan-only steps don't count
+  against `max_steps` (up to `max_steps // 2`).
+- **Steering:** `plan.get` / `plan.edit` over IPC, `kama plan show|add|cancel`, and in the
+  TUI. An edit reaches the model on its next unsent user message (`plan.notice`).
+- **Observability:** plan progress in `kama runs`, a plan line, plan-only steps and "time
+  per task" (one `plan` span per stretch of work) in `kama trace`, its own Perfetto lane;
+  plan metrics, budget credit and an "ended at max_steps" count in the eval summary.
+- **TUI (`kama tui`):** status line, live log (streamed text under its step, collapsible
+  tool calls), live plan panel, goal box, approval modal, steering, stop, runs picker,
+  trace view, and reconnect-with-resume.
+- **Eval:** `risk-report-spec` (ten requirements graded separately); `KAMA_PLANNING=false`
+  is the S2 agent byte for byte, for A/B runs.
 
-Method, as in S1: the eval task came first (what "done" means), then plan state,
-tools, loop, daemon, CLI, trace, harness, each with scripted-fake tests before the
-next layer; then real processes against `scripts/fake_api.py` (now an automated
-integration test); then these notes.
+Method, as in S1: the eval task first (what "done" means), then plan state, tools, loop,
+daemon, CLI, trace, harness, TUI, each tested with scripted fakes before the next layer;
+then real processes against `scripts/fake_api.py` (automated integration tests for both
+the CLI and the TUI); then these notes.
 
 Design choices worth defending:
-- **Planning as tools, not prompts.** "Think step by step and make a plan" puts the plan
-  in prose that scrolls away and that nothing can check. As tool calls, the plan is
-  state: the runtime can show it, persist it, and act on it.
-- **CRUD by id instead of rewriting the whole list** (Claude Code's TodoWrite rewrites
-  it). An update costs a few tokens instead of the whole list, and a task can't silently
-  vanish: dropping one means `cancelled` with a reason, which leaves an audit trail.
-  Trade-off: more calls than one rewrite, and ids to get right (a wrong id is an
-  `is_error` result listing the valid ones).
-- **Every task_* result echoes the whole plan**, so the latest thing the model read
-  about its plan is always current.
-- **Events carry a snapshot, not a diff.** A client attaching late needs only the last
-  one, and replaying one twice is harmless. The CLI computes the diff for display.
-- **The reminder is the payoff of plan-as-state.** Stopping early (the `two-bugs` and
-  `stopped-early` failure) is invisible in a transcript until a grader catches it; with
-  a plan, "ended the turn with open tasks" is a check the runtime can make for free. It
-  fires **once**: a model with a real reason to stop (blocked, needs the user) is not
-  forced on, and it can't loop to max_steps. It's a durable event because it is part of
-  the conversation: without it events.jsonl could not rebuild what the model saw (tested).
-- **Planning off = the S2 agent, byte for byte** (same prompt, no task tools; tested).
-  An A/B that changes more than one thing measures nothing.
-- **No approval for task_* tools**: pure bookkeeping inside the run.
+- **Planning as tools, not prompts.** A plan in prose scrolls away and nothing can check
+  it. As state, the runtime can show it, persist it, enforce the order the model itself
+  declared, time each task, and notice "said done with work open".
+- **CRUD by id, batched** (vs. TodoWrite's full rewrite): an update costs a few tokens, a
+  task can't silently vanish (cancel needs a reason), and "complete 1, start 2" is one
+  atomic call.
+- **Dependencies are enforced**, not advisory: starting a blocked task is an `is_error`
+  result naming the open blockers and how to drop the dependency. A cancelled blocker
+  counts as resolved.
+- **Snapshots, not diffs, in events**: a late client needs only the last one; replaying
+  one twice is harmless. Clients compute diffs for display.
+- **One reminder, never more**, and **steering notices go on the next unsent user message**:
+  both keep history append-only, and both are durable events, so `events.jsonl` still
+  rebuilds exactly what the model saw (tested for both).
+- **Attribution:** only a plan tool may emit a model-attributed plan change. A user edit
+  that lands while `bash` runs bumps the plan version; without that rule it would be
+  reported as a change made by `bash` (found while designing, pinned by a test).
+- **The step allowance** comes from the Haiku A/B (below): with the same `max_steps`, the
+  planning agent spent budget on bookkeeping that the no-plan agent spent on work. The
+  allowance gives both arms the same work budget; the cap bounds a bookkeeping loop.
+- **The TUI folds events into a pure `RunView`** and only renders; dedupe on reconnect,
+  cost, plan and pending approvals are unit-tested without a terminal.
 
-What the trace showed (scripted fake, so it proves the metric, not the behaviour):
-- Planning has a cost the pass rate won't show: 3 of 6 model calls did nothing but
-  update the plan (~36% of wall time), and those steps count against `max_steps`. Both
-  `kama trace` and the eval summary now report "plan-only steps", so the real A/B
-  measures the cost next to the benefit.
+A/B results so far (user's VM, 3 reps × 9 tasks):
+- Opus 5: 27/27 without planning. The suite is saturated for Opus, so it can't show an
+  effect either way (a ceiling, not "no difference").
+- Haiku 4.5: 23/27 with and without planning (noise floor ±19%). With planning: a plan in
+  10/27 trials (median 7.5 tasks), task_* = 24% of tool calls, 69/349 steps plan-only,
+  median cost +16%, **open tasks at the end in 4 trials but 0 reminders**. The reminder
+  fires on every end_turn with open tasks, so those 4 must have ended another way; most
+  likely `max_steps` (to be confirmed from results.jsonl; the summary now prints "ended
+  at max_steps" directly). The failure the reminder was built for never happened; the one
+  that did was budget exhaustion, which the step allowance addresses.
+- Next: re-run the Haiku pair on this version (allowance, batched updates, deps).
 
-Bugs found by the tests (all in my tests, which is worth saying honestly):
-- A version-counter assertion off by one, a console assertion that depended on timing
-  (`0ms`), and an integration expectation that forgot plan creation is itself a plan-only
-  step. The last one is a definition question: creating the plan is part of its cost.
-- A daemon test used a fixed `sleep` to "let the replay arrive". It was unnecessary:
-  replay + live has no gap whenever the subscription lands, so the sleep was removed
-  (the repo rule is readiness signals, never fixed sleeps).
-
-Cut: **the TUI.** The roadmap timeboxed it, and it teaches nothing the CLI checklist
-doesn't; it would be a second thin client on the same protocol, i.e. more of S2. The
-time goes to the measurement instead. Revisit only if a demo needs it.
-
-Still open: **the paid A/B** (below) decides whether planning stays on by default.
-Other ideas, only if the numbers say so: count plan-only steps outside `max_steps`,
-or let `task_update` accept several ids at once to cut bookkeeping round-trips.
+Bugs found by the tests and the screenshots:
+- The runs picker sorted by run id, which has 1-second resolution plus a random suffix,
+  so two runs started in the same second came out in random order (test flaked; now
+  sorted by `started_at`).
+- Naming a TUI helper `_log` silently overrode Textual's own `App._log`; mypy's override
+  check caught it.
+- From the screenshots, not the tests: streamed text appeared under the previous step
+  (deltas arrive before the llm.response that drew the divider) and the log didn't scroll
+  to new content (scrolled before layout). Both fixed; ordering now tested.
+- A test "dropped" a TUI connection that wasn't open yet (the run reached its pause before
+  the watch connected); several expectations of mine were wrong (version counts, what
+  counts as a plan-only step, when a mid-call edit reaches the model: the *next* call).
 
 ### The S3 experiment (run on the VM; costs money)
 
 ```bash
-uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s3-plan
-KAMA_PLANNING=false uv run python -m evals.run_evals run --reps 3 --variant s3-noplan
-uv run python -m evals.run_evals summary --variant s3-plan
-uv run python -m evals.run_evals summary --variant s3-noplan
-# the same pair with --model claude-haiku-4-5 (variants s3-plan-haiku / s3-noplan-haiku)
+uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s3b-plan-haiku --model claude-haiku-4-5
+KAMA_PLANNING=false uv run python -m evals.run_evals run --reps 3 --variant s3b-noplan-haiku --model claude-haiku-4-5
+uv run python -m evals.run_evals summary --variant s3b-plan-haiku    # and s3b-noplan-haiku
 ```
 
-Read, in this order: pass rate with its CI (differences inside the noise floor are not
-real), `risk-report-spec` per-requirement reasons, the planning line (plans made, open
-at end, "passed after reminder", plan-only steps), then steps/tokens/cost per trial.
-Watch for `max_steps` endings on the short-budget tasks (`two-bugs` has 15): planning
-spends steps.
+Read, in this order: pass rate against the noise floor, "ended at max_steps", the
+planning line (plans made, open at end, passed after reminder, plan-only steps and how
+many were credited), `risk-report-spec`'s per-requirement reasons, then cost per trial.
 
 ## Interview talking points
 
 ### S3
-- "How does your agent plan?" Tools, not prompts: the plan is state the runtime can
-  check. The concrete payoff: detecting "said done with work open" and reminding once.
-- The design trade-off: CRUD-by-id vs. TodoWrite-style full rewrite (tokens per update,
-  silent drops, number of calls).
-- The measurement: an A/B where the only difference is the planning switch, an eval
-  task that grades ten requirements separately, and a cost metric (plan-only steps)
-  next to the benefit metric. "Planning didn't help Opus but helped Haiku" or "didn't
-  help at all" are both fine answers when you can show the numbers.
+- "How does your agent plan?" Tools, not prompts: a task DAG the runtime can check,
+  enforce, time and show, and that a human can steer mid-run.
+- The measurement story: a one-variable A/B, an eval that grades ten requirements
+  separately, and cost metrics next to benefit metrics. Planning did not move the pass
+  rate; the hypothesis behind the reminder was wrong (it never fired); the real cost was
+  step-budget exhaustion, which led to the step allowance.
+- Human-in-the-loop without breaking the conversation: edits land on the next unsent
+  user message, recorded as events, never rewriting history.
 
 ### S1
 - "Walk me through your agent loop": the stop-reason state machine above, the append-only

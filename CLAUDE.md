@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S3 (full version: task graph, plan steering, TUI) in progress**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S3 done (full version; Haiku A/B re-run pending) → S4 next**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -83,6 +83,7 @@ uv run kama run --detach "..."        # print run id and return; the run keeps g
 uv run kama attach RUN_ID             # watch (and answer approvals) from another terminal
 uv run kama runs | kama cancel RUN_ID
 uv run kama plan show|add|cancel RUN_ID ...   # read a plan; steer a live one
+uv run kama tui [RUN_ID] [-w DIR] [-y]    # full-screen UI (also: kama-tui)
 uv run kama run --local "..."         # in-process, no daemon (S1 behaviour)
 uv run kama trace [RUN_ID]            # where a run's time/tokens/cost went (default: latest)
 uv run kama trace RUN_ID --chrome t.json   # open in https://ui.perfetto.dev
@@ -130,10 +131,13 @@ src/kama_claude/
     agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
     agent/runner.py      build_loop(), run_goal() (in-process: --local, evals)
     agent/manager.py     RunManager (daemon): runs, fan-out with replay, approvals, cancel
-  cli/main.py            run / attach / runs / cancel / ping / trace; watch() renders + answers
+  cli/main.py            run / attach / runs / cancel / plan / ping / trace / tui; watch()
+  tui/state.py           RunView: pure fold of a run's events (dedupe, cost, plan, approvals)
+  tui/app.py             Textual app: log, plan panel, approvals, steering, runs, trace, reconnect
 scripts/fake_api.py      fake streaming Messages API with realistic timing (offline smoke tests)
-tests/fakes.py           ScriptedProvider (streams its text), GatedProvider (waits on an Event)
-tests/unit/              protocol, config, server, tools, loop, provider (mock SSE), daemon, CLI
+tests/fakes.py           ScriptedProvider (streams its text), GatedProvider, PausingProvider
+tests/unit/              protocol, config, server, tools, loop, plan, provider (mock SSE), daemon,
+                         CLI, TUI (Textual Pilot against an in-process kama-core)
 tests/integration/       real daemon + CLI subprocesses
 tests/live/              real API; deselected by default
 evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
@@ -204,6 +208,8 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
 - Plan-only steps (every tool call a plan tool) don't count against `max_steps`, up to
   `max_steps // 2`; `run.finished` records `plan_only_steps` and `budget_credit`.
 - Each stretch of a task in_progress is a `plan` span (monotonic duration) under `run`.
+- The TUI is a thin client: everything over the protocol, state folded in `RunView`, and
+  after a reconnect it resumes from `next_seq` (nothing shown twice or missed).
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

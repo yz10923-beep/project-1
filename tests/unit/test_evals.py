@@ -210,6 +210,7 @@ async def test_rows_record_how_the_plan_was_used(tmp_path: Path) -> None:
         "task_calls": 3,
         "reminders": 1,
         "plan_only_steps": 2,  # step 1 (create) and step 4 (complete task 2)
+        "budget_credit": 2,  # both within the allowance
     }
     trace = json.loads((cfg.variant_dir / "traces" / "fix-add-bug_rep0.json").read_text())
     assert "task_create" in trace[0]["content"]  # the system prompt the model really got
@@ -217,7 +218,7 @@ async def test_rows_record_how_the_plan_was_used(tmp_path: Path) -> None:
     summary = summarize(cfg.variant_dir)
     assert "plan made in 1/1 trials (median 2 tasks)" in summary
     assert "reminded in 1 (passed after reminder: 1/1)" in summary
-    assert "task_* = 75% of tool calls · plan-only steps 2/5" in summary
+    assert "task_* = 75% of tool calls · plan-only steps 2/5 (2 not counted" in summary
 
 
 async def test_planning_off_rows_have_no_plan(tmp_path: Path) -> None:
@@ -227,3 +228,12 @@ async def test_planning_off_rows_have_no_plan(tmp_path: Path) -> None:
     [row] = rows(cfg)
     assert row["plan"] is None
     assert "planning:" not in summarize(cfg.variant_dir)
+
+
+async def test_summary_counts_trials_that_ran_out_of_steps(tmp_path: Path) -> None:
+    looping = [tool_response((f"l{i}", "list_dir", {})) for i in range(40)]
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(list(looping)))
+    cfg.settings = cfg.settings.model_copy(update={"max_steps": 3})
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    assert rows(cfg)[0]["run_status"] == "max_steps"
+    assert "- ended at max_steps: 1 trial(s) (fix-add-bug)" in summarize(cfg.variant_dir)
