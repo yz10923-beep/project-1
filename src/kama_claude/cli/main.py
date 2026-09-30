@@ -219,7 +219,8 @@ async def _runs(settings: Settings, args: argparse.Namespace) -> int:
         print("no runs since kama-core started")
     for r in res.runs:
         waiting = f" · {r.pending_approvals} awaiting approval" if r.pending_approvals else ""
-        print(f"{r.run_id}  {r.status:<10} {r.goal[:60]!r}{waiting}")
+        plan = f" · plan {r.plan_done}/{r.plan_total}" if r.plan_total else ""
+        print(f"{r.run_id}  {r.status:<10} {r.goal[:60]!r}{plan}{waiting}")
     return EXIT_OK
 
 

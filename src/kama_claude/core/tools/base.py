@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
+from kama_claude.core.plan import Plan
+
 
 @dataclass(frozen=True)
 class ToolContext:
     workspace: Path
+    # One plan per run; only the task_* tools touch it.
+    plan: Plan = field(default_factory=Plan)
 
 
 @dataclass(frozen=True)

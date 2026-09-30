@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **Trace done → S3 next**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S3 done (TUI cut; eval A/B pending) → S4 next**.
 
 ### Commands
 
@@ -96,7 +96,8 @@ uv run python -m evals.run_evals summary [--variant v1]
 Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the API key in
 `~/.kama/.env` so it works from any workspace): `ANTHROPIC_API_KEY`, `KAMA_MODEL` (default `claude-opus-5`),
 `KAMA_MAX_STEPS` (30), `KAMA_MAX_TOKENS` (16000), `KAMA_EFFORT` (unset = API default),
-`KAMA_REFUSAL_FALLBACK` (true; only sent for models that support it), `KAMA_RUNS_DIR` (`~/.kama/runs`),
+`KAMA_REFUSAL_FALLBACK` (true; only sent for models that support it), `KAMA_PLANNING` (true;
+false = no task_* tools, the S2 agent, for A/B runs), `KAMA_RUNS_DIR` (`~/.kama/runs`),
 `KAMA_TOKEN_FILE` (`~/.kama/core.token`), `KAMA_APPROVAL_TIMEOUT_S` (600).
 
 ### Layout
@@ -115,12 +116,14 @@ src/kama_claude/
     llm/types.py         LLMProvider protocol, LLMResponse (raw blocks + parsed views), Usage
     llm/anthropic_provider.py  Messages API via raw SDK (streamed); TTFT; errors; caching
     llm/pricing.py       one price table; cost_usd(model, usage) (None if unpriced)
+    plan.py              Plan (a run's task list: add/update/render), PlanTask, statuses
     trace/span.py        Span: trace_id, span_id, parent_id, kind (agent|llm|tool|bus|ipc)
     trace/tracer.py      Tracer: span() context manager (ContextVar parents), record()
     trace/analyze.py     summarize() (pure), render() text report, to_chrome() export
     tools/base.py        Tool[Params] ABC, ToolResult, workspace path confinement
     tools/registry.py    validate input -> run -> every failure becomes an is_error result
     tools/builtin.py     read_file, list_dir, write_file, bash
+    tools/plan_tools.py  task_create, task_update, task_list (no approval; echo the plan)
     agent/loop.py        AgentLoop: model -> tools -> results -> repeat; emits run events
     agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
     agent/runner.py      build_loop(), run_goal() (in-process: --local, evals)
@@ -134,7 +137,8 @@ tests/live/              real API; deselected by default
 evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
 evals/run_evals.py       CLI: list / selftest / run / summary; harness-approval gate
 evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ + wrong/*/ + [alt/*/]
-                         (log-error-triage is the reference task; `_delete.txt` in a solution deletes)
+                         (log-error-triage is the reference task; `_delete.txt` in a solution deletes;
+                         risk-report-spec grades 10 requirements separately, wrong/ from make_answers.py)
 evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/ git-ignored)
 ```
 
@@ -185,6 +189,12 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   a trace.
 - The daemon shares one SDK client per API key (built at startup): constructing one
   costs ~50-80ms and a shared client keeps its connection pool.
+- Each run has its own Plan, changed only by task_* tools. A change emits `plan.updated`
+  with the whole task list (snapshot, not diff). Cancelling a task needs a note; tasks
+  are never deleted.
+- Ending the turn with open tasks gets one reminder (`plan.reminder`, durable, appended
+  as a user message), never more. With planning off the prompt and tools are exactly
+  the S2 ones, so A/B runs change one thing.
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

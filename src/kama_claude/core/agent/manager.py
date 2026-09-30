@@ -38,11 +38,13 @@ from kama_claude.core.bus.commands import RunInfo, StreamEnd
 from kama_claude.core.bus.events import (
     EVENT_ADAPTER,
     Event,
+    PlanUpdatedEvent,
     RunFinishedEvent,
     is_durable,
 )
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.types import LLMProvider, ToolCall
+from kama_claude.core.plan import PlanTask
 from kama_claude.core.trace.tracer import Tracer
 
 logger = logging.getLogger(__name__)
@@ -125,6 +127,7 @@ class RunHandle:
     pending: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
     task: asyncio.Task[RunResult] | None = None
     tracer: Tracer = field(default_factory=Tracer.noop)
+    plan: list[PlanTask] = field(default_factory=list)  # latest plan.updated snapshot
 
     def info(self) -> RunInfo:
         return RunInfo(
@@ -134,6 +137,8 @@ class RunHandle:
             workspace=str(self.workspace),
             started_at=self.started_at,
             pending_approvals=len(self.pending),
+            plan_done=sum(t.status == "completed" for t in self.plan) if self.plan else None,
+            plan_total=len(self.plan) if self.plan else None,
         )
 
 
@@ -148,6 +153,8 @@ class _RunSink:
         if is_durable(event):
             await self._writer.emit(event)
             self._handle.history.append(event)
+        if isinstance(event, PlanUpdatedEvent):
+            self._handle.plan = event.tasks
         for sub in list(self._handle.subscribers):
             sub.offer(event)
 

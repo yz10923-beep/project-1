@@ -15,6 +15,7 @@ from kama_claude.core.config import Settings
 from kama_claude.core.llm.anthropic_provider import AnthropicProvider
 from kama_claude.core.llm.types import LLMProvider
 from kama_claude.core.tools.builtin import builtin_tools
+from kama_claude.core.tools.plan_tools import plan_tools
 from kama_claude.core.tools.registry import ToolRegistry
 from kama_claude.core.trace.tracer import JsonlSpanWriter, Tracer
 
@@ -62,7 +63,7 @@ def build_loop(
 ) -> AgentLoop:
     return AgentLoop(
         provider=provider or make_provider(settings),
-        registry=ToolRegistry(builtin_tools()),
+        registry=ToolRegistry(builtin_tools() + (plan_tools() if settings.planning else [])),
         sink=sink,
         workspace=workspace,
         approver=approver,

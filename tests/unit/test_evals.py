@@ -179,3 +179,49 @@ async def test_request_error_is_not_retried_and_aborts_the_suite(tmp_path: Path)
     assert calls == 1  # no retry, and no further trials started
     [err] = rows(cfg, "errors.jsonl")
     assert err["class"] == "request_error"
+
+
+def planned_solve_script() -> list[LLMResponse | LLMError]:
+    return [
+        tool_response(("c", "task_create", {"tasks": ["fix add", "run the tests"]})),
+        tool_response(
+            ("u1", "task_update", {"id": 1, "status": "completed"}),
+            ("w", "write_file", {"path": "calc.py", "content": FIXED_CALC}),
+        ),
+        text_response("Fixed."),  # task 2 still open: the loop reminds once
+        tool_response(("u2", "task_update", {"id": 2, "status": "completed"})),
+        text_response("Fixed add(); tests pass."),
+    ]
+
+
+async def test_rows_record_how_the_plan_was_used(tmp_path: Path) -> None:
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(planned_solve_script()))
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 1.0
+    assert row["plan"] == {
+        "tasks": 2,
+        "completed": 2,
+        "cancelled": 0,
+        "open": 0,
+        "updates": 3,
+        "task_calls": 3,
+        "reminders": 1,
+        "plan_only_steps": 2,  # step 1 (create) and step 4 (complete task 2)
+    }
+    trace = json.loads((cfg.variant_dir / "traces" / "fix-add-bug_rep0.json").read_text())
+    assert "task_create" in trace[0]["content"]  # the system prompt the model really got
+    assert any(t["role"] == "user" and "unfinished tasks" in t["content"] for t in trace)
+    summary = summarize(cfg.variant_dir)
+    assert "plan made in 1/1 trials (median 2 tasks)" in summary
+    assert "reminded in 1 (passed after reminder: 1/1)" in summary
+    assert "task_* = 75% of tool calls · plan-only steps 2/5" in summary
+
+
+async def test_planning_off_rows_have_no_plan(tmp_path: Path) -> None:
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(solve_script()))
+    cfg.settings = cfg.settings.model_copy(update={"planning": False})
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    [row] = rows(cfg)
+    assert row["plan"] is None
+    assert "planning:" not in summarize(cfg.variant_dir)

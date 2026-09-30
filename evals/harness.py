@@ -40,12 +40,16 @@ from kama_claude.core.bus.events import (
     EVENT_ADAPTER,
     Event,
     LLMResponseEvent,
+    PlanReminderEvent,
+    PlanUpdatedEvent,
+    RunStartedEvent,
     ToolFinishedEvent,
     ToolStartedEvent,
 )
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import LLMProvider, ToolCall
+from kama_claude.core.plan import PLAN_TOOL_NAMES
 
 FLOW = "kama-run"
 EVALS_DIR = Path(__file__).resolve().parent
@@ -312,10 +316,42 @@ def _usage_sum(events: list[Event]) -> dict[str, int]:
     return {k: totals[k] for k in keys}
 
 
+def _planning(events: list[Event]) -> bool:
+    return any(isinstance(e, RunStartedEvent) and e.planning for e in events)
+
+
+def plan_metrics(events: list[Event]) -> dict[str, int] | None:
+    """How the agent used its plan; None when the task_* tools were not offered."""
+    if not _planning(events):
+        return None
+    snaps = [e for e in events if isinstance(e, PlanUpdatedEvent)]
+    final = snaps[-1].tasks if snaps else []
+    completed = sum(t.status == "completed" for t in final)
+    cancelled = sum(t.status == "cancelled" for t in final)
+    return {
+        "tasks": len(final),
+        "completed": completed,
+        "cancelled": cancelled,
+        "open": len(final) - completed - cancelled,
+        "updates": len(snaps),
+        "task_calls": sum(
+            isinstance(e, ToolStartedEvent) and e.name in PLAN_TOOL_NAMES for e in events
+        ),
+        "reminders": sum(isinstance(e, PlanReminderEvent) for e in events),
+        # model calls whose only tool calls were task_*: pure bookkeeping round-trips
+        "plan_only_steps": sum(
+            isinstance(e, LLMResponseEvent)
+            and bool(calls := [b["name"] for b in e.content if b["type"] == "tool_use"])
+            and all(n in PLAN_TOOL_NAMES for n in calls)
+            for e in events
+        ),
+    }
+
+
 def to_trace(task: Task, ws: Path, events: list[Event]) -> list[dict[str, Any]]:
     """Events -> the role-based transcript format eval viewers render."""
     turns: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt(ws)},
+        {"role": "system", "content": system_prompt(ws, planning=_planning(events))},
         {"role": "user", "content": task.goal},
     ]
     for e in events:
@@ -336,6 +372,8 @@ def to_trace(task: Task, ws: Path, events: list[Event]) -> list[dict[str, Any]]:
                 turns[-1]["thinking"] = thinking
         elif isinstance(e, ToolFinishedEvent):
             turns.append({"role": "tool_result", "name": e.name, "content": e.output})
+        elif isinstance(e, PlanReminderEvent):
+            turns.append({"role": "user", "content": e.text})
     return turns
 
 
@@ -467,6 +505,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 "steps": result.steps,
                 "tool_calls": len(tools),
                 "tool_errors": sum(e.is_error for e in tools),
+                "plan": plan_metrics(events),
                 "latency_s": round(sum(e.latency_ms for e in llm) / 1000, 2),
                 "wall_s": round(wall_s, 2),
                 "attempts": attempt,
@@ -541,6 +580,25 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
+def _planning_line(rows: list[dict[str, Any]]) -> str:
+    """Did the agent plan, finish its plan, and did the end-of-turn reminder help?"""
+    plans = [r["plan"] for r in rows]
+    made = [p for p in plans if p["tasks"]]
+    reminded = [r for r in rows if r["plan"]["reminders"]]
+    rescued = sum(int(r["grade"]["passed"]) for r in reminded)
+    task_calls = sum(p["task_calls"] for p in plans)
+    tool_calls = sum(r["tool_calls"] for r in rows) or 1
+    median_tasks = statistics.median(p["tasks"] for p in made) if made else 0
+    return (
+        f"- planning: plan made in {len(made)}/{len(rows)} trials "
+        f"(median {median_tasks} tasks) · open tasks at end in "
+        f"{sum(p['open'] > 0 for p in plans)} · reminded in {len(reminded)} "
+        f"(passed after reminder: {rescued}/{len(reminded)}) · task_* = "
+        f"{task_calls / tool_calls:.0%} of tool calls · plan-only steps "
+        f"{sum(p['plan_only_steps'] for p in plans)}/{sum(r['steps'] for r in rows)}"
+    )
+
+
 def summarize(variant_dir: Path) -> str:
     res_path, err_path = variant_dir / "results.jsonl", variant_dir / "errors.jsonl"
     rows = (
@@ -590,6 +648,8 @@ def summarize(variant_dir: Path) -> str:
     if truncated or errs:
         classes = Counter(e["class"] for e in errs)
         lines.append(f"- NOT SCORED: {truncated} truncated, errors {dict(classes)}")
+    if planned := [r for r in ok if r.get("plan") is not None]:
+        lines.append(_planning_line(planned))
     if leaks := [r for r in ok if r["meta"].get("leak_suspect")]:
         lines.append(f"- WARNING: {len(leaks)} trial(s) touched eval files; inspect their traces")
     lines += ["", "| task | tags | passed | steps | reason (last rep) |", "|---|---|---|---|---|"]

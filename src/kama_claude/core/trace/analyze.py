@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kama_claude.core.plan import PLAN_TOOL_NAMES
 from kama_claude.core.trace.span import Span
 
 _TOKEN_KEYS = (
@@ -56,6 +57,13 @@ class TraceSummary:
     slowest: list[Span] = field(default_factory=list)
     subscriptions: list[dict[str, Any]] = field(default_factory=list)
     ipc: dict[str, dict[str, float]] = field(default_factory=dict)
+    # S3: tasks/completed/cancelled/open/reminders from the run span; None if planning off
+    plan: dict[str, int] | None = None
+    tool_calls: int = 0
+    plan_tool_calls: int = 0  # task_* calls: the bookkeeping cost of planning
+    # Steps whose only tool calls were task_*: a whole model round-trip spent on the plan.
+    plan_only_steps: int = 0
+    plan_only_ms: float = 0.0
 
     @property
     def other_ms(self) -> float:
@@ -85,6 +93,10 @@ def summarize(spans: list[Span]) -> TraceSummary:
         steps=int(run.attrs.get("steps", 0)),
         tokens={k: 0 for k in _TOKEN_KEYS},
     )
+    if "plan_tasks" in run.attrs:
+        summary.plan = {
+            k.removeprefix("plan_"): int(v) for k, v in run.attrs.items() if k.startswith("plan_")
+        }
     for s in spans:
         if s.kind == "llm":
             summary.llm_ms += s.duration_ms
@@ -113,8 +125,20 @@ def summarize(spans: list[Span]) -> TraceSummary:
             summary.tool_ms += s.duration_ms
         elif s.name == "tool.approval":
             summary.approval_ms += s.duration_ms
+        elif s.kind == "tool":  # the `tool <name>` span around approval + exec
+            summary.tool_calls += 1
+            summary.plan_tool_calls += s.attrs.get("tool") in PLAN_TOOL_NAMES
         elif s.kind == "bus":
             summary.subscriptions.append({"duration_ms": s.duration_ms, **s.attrs})
+    tools_by_step: dict[str, list[str]] = defaultdict(list)
+    for s in spans:
+        if s.kind == "tool" and s.parent_id is not None and "tool" in s.attrs:
+            tools_by_step[s.parent_id].append(str(s.attrs["tool"]))
+    for s in spans:
+        names = tools_by_step.get(s.span_id)
+        if s.name.startswith("step ") and names and all(n in PLAN_TOOL_NAMES for n in names):
+            summary.plan_only_steps += 1
+            summary.plan_only_ms += s.duration_ms
     work = [s for s in spans if s.kind == "llm" or s.name == "tool.exec"]
     summary.slowest = sorted(work, key=lambda s: s.duration_ns, reverse=True)[:3]
 
@@ -175,9 +199,21 @@ def render(spans: list[Span], width: int = 40) -> str:
         f"{t['cache_read_input_tokens']:,} cache read · "
         f"{t['cache_creation_input_tokens']:,} cache write · {t['output_tokens']:,} out "
         f"(cache hit {hit})",
-        "",
-        "timeline" + " " * 21 + "|" + "-" * width + "|",
     ]
+    if s.plan is not None:
+        p = s.plan
+        share = f" ({s.plan_tool_calls / s.tool_calls:.0%} of tool calls)" if s.tool_calls else ""
+        lines.append(
+            f"plan    {p.get('tasks', 0)} tasks · {p.get('completed', 0)} completed · "
+            f"{p.get('cancelled', 0)} cancelled · {p.get('open', 0)} open · "
+            f"{p.get('reminders', 0)} reminder(s) · {s.plan_tool_calls} task_* calls{share}"
+        )
+        if s.plan_only_steps:
+            lines.append(
+                f"        {s.plan_only_steps} of {s.steps} steps only updated the plan "
+                f"({_fmt_s(s.plan_only_ms)}, {s.plan_only_ms / wall:.0%} of wall time)"
+            )
+    lines += ["", "timeline" + " " * 21 + "|" + "-" * width + "|"]
     run_start = min(x.start_ns for x in spans if x.name == "run")
     depths = _depths(spans)
     for x in spans:

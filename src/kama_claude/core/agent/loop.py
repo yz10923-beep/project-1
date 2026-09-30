@@ -10,6 +10,11 @@ Invariants:
 
 Tracing: the loop opens one span per run, step, model call and tool (with approval and
 execution as children), so a trace shows where the time and tokens went.
+
+Planning (S3): each run gets a fresh Plan that only the task_* tools change. After a
+tool changes it the loop emits plan.updated (a snapshot), and if the model ends its turn
+with open tasks it is reminded once instead of the run finishing: the plan turns
+"stopped early" from invisible into something the runtime can detect.
 """
 
 from __future__ import annotations
@@ -28,6 +33,8 @@ from kama_claude.core.agent.sinks import EventSink
 from kama_claude.core.bus.events import (
     LLMDeltaEvent,
     LLMResponseEvent,
+    PlanReminderEvent,
+    PlanUpdatedEvent,
     RunFinishedEvent,
     RunStartedEvent,
     RunStatus,
@@ -38,6 +45,7 @@ from kama_claude.core.bus.events import (
 )
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import LLMError, LLMProvider, Message, ToolCall, Usage
+from kama_claude.core.plan import PLAN_TOOL_NAMES, Plan, PlanTask, render_task
 from kama_claude.core.tools.base import ToolContext, ToolResult
 from kama_claude.core.tools.registry import ToolRegistry
 from kama_claude.core.trace.tracer import Tracer
@@ -57,6 +65,20 @@ type Approver = Callable[[ToolCall], Awaitable[bool | ApprovalDecision]]
 
 DENIED_MESSAGE = "The user denied this tool call. Do not retry it; choose another approach or stop."
 
+# One reminder is enough to catch an early stop; more would fight a model that has a
+# good reason to stop (blocked, needs the user) and could loop until max_steps.
+MAX_PLAN_REMINDERS = 1
+
+
+def plan_reminder(open_tasks: list[PlanTask]) -> str:
+    lines = "\n".join(render_task(t) for t in open_tasks)
+    return (
+        "You ended your turn, but your plan still has unfinished tasks:\n"
+        f"{lines}\n\n"
+        "Continue with them. If a task is no longer needed, cancel it with a reason; if "
+        "you are blocked and need the user, say so. Then give your final answer."
+    )
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -73,6 +95,7 @@ class RunResult:
 class _RunState:
     steps: int = 0
     usage: Usage = field(default_factory=Usage)
+    plan_reminders: int = 0
 
 
 @dataclass(frozen=True)
@@ -117,6 +140,9 @@ class AgentLoop:
         self._max_steps = max_steps
         self._tracer = tracer or Tracer.noop()
         self._seq = 0
+        # The system prompt only mentions planning when the tools are really there.
+        self._planning = all(registry.get(n) is not None for n in PLAN_TOOL_NAMES)
+        self._state = _RunState()
 
     def _meta(self, run_id: str) -> dict[str, Any]:
         meta = {"run_id": run_id, "seq": self._seq, "at": datetime.now(UTC)}
@@ -127,6 +153,12 @@ class AgentLoop:
         with self._tracer.span("run", "agent", model=self._provider.model) as span:
             result = await self._run(goal, run_id)
             span.set(status=result.status, steps=result.steps, **result.usage.model_dump())
+            if self._planning:
+                counts = self._ctx.plan.counts()
+                span.set(
+                    **{f"plan_{k}": v for k, v in counts.items()},
+                    plan_reminders=self._state.plan_reminders,
+                )
             if result.status != "completed":
                 span.fail(result.error or result.status)
             return result
@@ -134,7 +166,8 @@ class AgentLoop:
     async def _run(self, goal: str, run_id: str) -> RunResult:
         t0 = time.monotonic()
         self._seq = 0
-        state = _RunState()
+        self._ctx = ToolContext(workspace=self._ctx.workspace, plan=Plan())
+        state = self._state = _RunState()
         await self._sink.emit(
             RunStartedEvent(
                 **self._meta(run_id),
@@ -142,6 +175,7 @@ class AgentLoop:
                 model=self._provider.model,
                 workspace=str(self._ctx.workspace),
                 max_steps=self._max_steps,
+                planning=self._planning,
             )
         )
 
@@ -165,7 +199,7 @@ class AgentLoop:
             )
             return RunResult(run_id, status, text, state.steps, state.usage, error, retryable)
 
-        system = system_prompt(self._ctx.workspace)
+        system = system_prompt(self._ctx.workspace, planning=self._planning)
         tools = self._registry.specs()
         messages: list[Message] = [{"role": "user", "content": goal}]
 
@@ -236,6 +270,8 @@ class AgentLoop:
 
         match resp.stop_reason:
             case "end_turn" | "stop_sequence":
+                if await self._remind_open_tasks(run_id, state, messages):
+                    return None
                 return _Finish("completed", resp.text)
             case "tool_use":
                 calls = resp.tool_calls
@@ -254,6 +290,26 @@ class AgentLoop:
             case _:
                 return _Finish("error", resp.text, f"unexpected stop_reason: {resp.stop_reason}")
 
+    async def _remind_open_tasks(
+        self, run_id: str, state: _RunState, messages: list[Message]
+    ) -> bool:
+        """If the model stopped with open tasks, send it the plan back (once). True if sent."""
+        open_tasks = self._ctx.plan.open_tasks()
+        if not open_tasks or state.plan_reminders >= MAX_PLAN_REMINDERS:
+            return False
+        state.plan_reminders += 1
+        text = plan_reminder(open_tasks)
+        await self._sink.emit(
+            PlanReminderEvent(
+                **self._meta(run_id),
+                step=state.steps,
+                open_task_ids=[t.id for t in open_tasks],
+                text=text,
+            )
+        )
+        messages.append({"role": "user", "content": text})
+        return True
+
     async def _run_tool(self, run_id: str, step: int, call: ToolCall) -> dict[str, Any]:
         """Execute one tool call and return its tool_result block. Never raises (except cancel)."""
         await self._sink.emit(
@@ -265,11 +321,18 @@ class AgentLoop:
                 input=call.input,
             )
         )
+        plan_version = self._ctx.plan.version
         with self._tracer.span(f"tool {call.name}", "tool", tool=call.name) as span:
             out = await self._approve_and_execute(run_id, step, call)
             span.set(denied=out.denied, output_chars=len(out.result.content))
             if out.result.is_error:
                 span.fail("denied" if out.denied else out.result.content[:200])
+        if self._ctx.plan.version != plan_version:
+            await self._sink.emit(
+                PlanUpdatedEvent(
+                    **self._meta(run_id), step=step, tool_use_id=call.id, tasks=self._ctx.plan.tasks
+                )
+            )
         await self._sink.emit(
             ToolFinishedEvent(
                 **self._meta(run_id),

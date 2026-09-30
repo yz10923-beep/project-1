@@ -364,3 +364,53 @@ def test_runs_share_one_sdk_client_per_api_key(tmp_path: Path) -> None:
     )
     assert a._client is b._client  # type: ignore[attr-defined]
     assert a._client is not other._client  # type: ignore[attr-defined]
+
+
+async def test_plan_progress_is_visible_to_late_clients_and_run_list(
+    daemon_factory: Any,
+) -> None:
+    """S3: the plan lives in the event stream, so a client that attaches mid-run
+    rebuilds it from the replay, and `kama runs` shows progress without subscribing."""
+
+    def planned() -> ScriptedProvider:
+        return ScriptedProvider(
+            [
+                tool_response(
+                    ("c", "task_create", {"tasks": ["inspect", "run it"]}),
+                    ("u1", "task_update", {"id": 1, "status": "in_progress"}),
+                ),
+                tool_response(
+                    ("u2", "task_update", {"id": 1, "status": "completed"}),
+                    ("b", "bash", {"command": "echo hi"}),  # waits for approval
+                ),
+                tool_response(("u3", "task_update", {"id": 2, "status": "completed"})),
+                text_response("done"),
+            ]
+        )
+
+    d = await daemon_factory(planned)
+    async with d.client("starter") as c:
+        run_id = await start(c, d, auto=False)
+        for _ in range(500):  # wait for the run to block on the bash approval
+            [info] = (await c.call(RUN_LIST, RunListParams(), RunListResult)).runs
+            if info.pending_approvals:
+                break
+            await asyncio.sleep(0.01)
+        assert (info.plan_done, info.plan_total) == (1, 2)
+
+        async with d.client("late") as late:
+            watching = asyncio.create_task(collect(late, run_id))
+            # No wait needed: replay + live has no gap, whenever the subscribe lands.
+            await c.call(
+                APPROVAL_RESPOND,
+                ApprovalRespondParams(run_id=run_id, tool_use_id="b", approve=True),
+                ApprovalRespondResult,
+            )
+            events, end = await watching
+        [info] = (await c.call(RUN_LIST, RunListParams(), RunListResult)).runs
+
+    assert end is not None and end.reason == "finished"
+    snaps = [e for e in events if e.type == "plan.updated"]
+    assert [s.tool_use_id for s in snaps] == ["c", "u1", "u2", "u3"]  # type: ignore[union-attr]
+    assert [t.status for t in snaps[-1].tasks] == ["completed", "completed"]  # type: ignore[union-attr]
+    assert (info.plan_done, info.plan_total) == (2, 2)

@@ -10,6 +10,8 @@ from kama_claude.core.bus.events import (
     Event,
     LLMDeltaEvent,
     LLMResponseEvent,
+    PlanReminderEvent,
+    PlanUpdatedEvent,
     RunFinishedEvent,
     RunStartedEvent,
     ToolApprovalResolvedEvent,
@@ -17,6 +19,7 @@ from kama_claude.core.bus.events import (
     ToolStartedEvent,
     is_durable,
 )
+from kama_claude.core.plan import PLAN_TOOL_NAMES, PlanTask, render_task
 
 
 class EventSink(Protocol):
@@ -58,6 +61,7 @@ class ConsolePrinter:
         self._out = out
         self._streamed_steps: set[int] = set()
         self._mid_line = False
+        self._plan: dict[int, PlanTask] = {}
 
     async def emit(self, event: Event) -> None:
         if not isinstance(event, LLMDeltaEvent) and self._mid_line:
@@ -89,6 +93,15 @@ class ConsolePrinter:
                     and (event.step not in self._streamed_steps)
                 ):
                     self._p(f"  {_one_line(text, 200)}")
+            case PlanUpdatedEvent():
+                self._show_plan(event.tasks)
+            case PlanReminderEvent():
+                n = len(event.open_task_ids)
+                self._p(f"  ! stopped with {n} open task(s); reminding the model of its plan")
+            case ToolStartedEvent() if event.name in PLAN_TOOL_NAMES:
+                pass  # the plan lines below say what changed
+            case ToolFinishedEvent() if event.name in PLAN_TOOL_NAMES and not event.is_error:
+                pass
             case ToolStartedEvent():
                 self._p(f"  → {event.name} {_one_line(json.dumps(event.input), 160)}")
             case ToolFinishedEvent():
@@ -105,6 +118,8 @@ class ConsolePrinter:
                     f"cache_read={u.cache_read_input_tokens} "
                     f"cache_write={u.cache_creation_input_tokens}"
                 )
+                if self._plan:
+                    self._p(_plan_summary(list(self._plan.values())))
                 if event.error:
                     self._p(f"error: {event.error}")
                 if event.final_text and not self._streamed_steps:
@@ -112,8 +127,30 @@ class ConsolePrinter:
             case _:
                 pass
 
+    def _show_plan(self, tasks: list[PlanTask]) -> None:
+        """Whole checklist when tasks are added; one line per change after that."""
+        before = self._plan
+        self._plan = {t.id: t for t in tasks}
+        progress = f"({sum(t.status == 'completed' for t in tasks)}/{len(tasks)})"
+        if self._plan.keys() - before.keys():
+            self._p(f"  plan {progress}")
+            for t in tasks:
+                self._p(f"    {render_task(t)}")
+            return
+        for t in tasks:
+            if t != before.get(t.id):
+                self._p(f"  {render_task(t)}  {progress}")
+
     def _p(self, line: str) -> None:
         print(line, file=self._out, flush=True)
+
+
+def _plan_summary(tasks: list[PlanTask]) -> str:
+    n = {s: sum(t.status == s for t in tasks) for s in ("completed", "cancelled")}
+    left = len(tasks) - n["completed"] - n["cancelled"]
+    return (
+        f"plan: {n['completed']}/{len(tasks)} completed · {n['cancelled']} cancelled · {left} open"
+    )
 
 
 def _one_line(text: str, limit: int) -> str:
