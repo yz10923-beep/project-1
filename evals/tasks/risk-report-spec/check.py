@@ -120,17 +120,23 @@ def _cli(ws: Path, *args: str) -> tuple[int, dict | None, str]:
     return r.returncode, report if isinstance(report, dict) else None, r.stderr
 
 
-def _report_ok(report: dict | None, top: list[str]) -> bool:
+def _report_errors(report: dict | None, top: list[str]) -> list[str]:
+    """Which report fields are wrong, as "field got != want", so a systematic mistake
+    (e.g. realized P&L summed over open positions only) reads straight off the reason."""
     if report is None:
-        return False
+        return ["stdout is not one JSON object"]
     want = {**REPORT, "top": top}
-    return (
-        report.get("positions") == want["positions"]
-        and _close(report.get("gross_exposure"), want["gross_exposure"])
-        and _close(report.get("realized_pnl"), want["realized_pnl"])
-        and report.get("top") == want["top"]
-        and report.get("rejected_rows") == want["rejected_rows"]
-    )
+    errors = []
+    for key in ("positions", "gross_exposure", "realized_pnl", "top", "rejected_rows"):
+        got = report.get(key)
+        same = (
+            _close(got, want[key])
+            if key in ("gross_exposure", "realized_pnl")
+            else got == want[key]
+        )
+        if not same:
+            errors.append(f"{key} {got!r} != {want[key]!r}")
+    return errors
 
 
 def _tests_ok(ws: Path, outcome: Outcome) -> bool:
@@ -187,19 +193,25 @@ def check(ws: Path, outcome: Outcome, fixture: Path) -> tuple[bool, str]:
         ok["R7"] = _close_map(got["R7"], EXPOSURE) and got["R7b"] is True
 
         code, report, _ = _cli(ws, trades, prices)
-        ok["R8"] = code == 0 and _report_ok(report, REPORT["top"])  # type: ignore[arg-type]
+        why: dict[str, str] = {}
+        r8 = _report_errors(report, REPORT["top"])  # type: ignore[arg-type]
+        if code != 0:
+            r8.insert(0, f"exit code {code}")
+        ok["R8"] = not r8
+        why["R8"] = "; ".join(r8)
         code2, report2, _ = _cli(ws, trades, prices, "--top", "2")
         code3, _, err3 = _cli(ws, trades, str(d / "prices_no_jpm.csv"))
-        ok["R9"] = (
-            code2 == 0
-            and _report_ok(report2, ["AAPL", "JPM"])
-            and code3 == 2
-            and "JPM" in err3
-            and "Traceback" not in err3
-        )
+        r9 = [f"--top 2: {e}" for e in _report_errors(report2, ["AAPL", "JPM"])]
+        if code2 != 0:
+            r9.insert(0, f"--top 2 exit code {code2}")
+        if code3 != 2 or "JPM" not in err3 or "Traceback" in err3:
+            r9.append(f"missing price: exit {code3}, stderr {err3.strip()[-80:]!r}")
+        ok["R9"] = not r9
+        why["R9"] = "; ".join(r9)
         ok["R10"] = _tests_ok(ws, outcome)
 
     failed = [k for k in REQUIREMENTS if not ok[k]]
     passed = len(REQUIREMENTS) - len(failed)
     reason = f"{passed}/10" + (f" · failed {' '.join(failed)}" if failed else " · all met")
-    return not failed, reason
+    details = [f"{k}: {why[k]}" for k in failed if why.get(k)]
+    return not failed, reason + "".join(f" · {d}" for d in details)

@@ -198,6 +198,33 @@ class ApprovalScreen(ModalScreen[bool | None]):
         self.dismiss(answer)
 
 
+class ChoiceScreen(ModalScreen[str | None]):
+    """What to do with text typed into the goal box while a run is live: typing there
+    used to start a second run when the user meant to steer the current one."""
+
+    BINDINGS = [
+        Binding("t", "choose('task')", "Add as task"),
+        Binding("n", "choose('new')", "New run"),
+        Binding("escape", "choose(None)", "Cancel"),
+    ]
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("A run is in progress. What should this do?", id="question")
+            yield Static(Text(self.text))
+            yield Label(
+                "t add it as a task to the current run · n start a new run · esc cancel",
+                classes="hint",
+            )
+
+    def action_choose(self, choice: str | None) -> None:
+        self.dismiss(choice)
+
+
 class FormScreen(ModalScreen[dict[str, str] | None]):
     """A few labelled inputs; Enter on the last one submits, Escape cancels."""
 
@@ -395,6 +422,12 @@ class KamaTui(App[None]):
 
     # -------------------------------------------------------------- rpc
 
+    def _fail(self, action: str, e: Exception) -> None:
+        text = e.message if isinstance(e, RpcError) else str(e)
+        if isinstance(e, CoreUnavailable):
+            text += "\nstart the daemon with: uv run kama-core"
+        self.notify(f"could not {action}: {text}", severity="error", timeout=8)
+
     async def rpc[R: BaseModel](self, method: str, params: BaseModel, result: type[R]) -> R:
         """One request on a short-lived connection (the watch keeps its own)."""
         async with self._client_factory() as client:
@@ -410,7 +443,7 @@ class KamaTui(App[None]):
                 RunStartResult,
             )
         except (CoreUnavailable, RpcError) as e:
-            self.notify(f"could not start the run: {e}", severity="error")
+            self._fail("start the run", e)
             return
         self.watch_run(started.run_id)
 
@@ -582,7 +615,7 @@ class KamaTui(App[None]):
                     ApprovalRespondResult,
                 )
             except (CoreUnavailable, RpcError) as e:
-                self.notify(f"could not send the answer: {e}", severity="error")
+                self._fail("send the answer", e)
                 return
             if not res.accepted:
                 self.notify("already answered elsewhere, or expired")
@@ -594,9 +627,22 @@ class KamaTui(App[None]):
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "goal" or not event.value.strip():
             return
-        goal = event.value.strip()
+        text = event.value.strip()
         event.input.value = ""
-        await self.start_run(goal)
+        view = self.view
+        if view is None or view.finished or not view.planning:
+            await self.start_run(text)
+            return
+
+        async def chosen(choice: str | None) -> None:
+            if choice == "new":
+                await self.start_run(text)
+            elif choice == "task":
+                await self._edit_plan(PlanEditParams(run_id=view.run_id, add=[NewTask(title=text)]))
+            else:
+                event.input.value = text  # cancelled: give the text back
+
+        self.push_screen(ChoiceScreen(text), chosen)
 
     def _live_run_id(self) -> str | None:
         if self.view is None or self.view.finished:
@@ -608,7 +654,7 @@ class KamaTui(App[None]):
         try:
             res = await self.rpc(PLAN_EDIT, params, PlanEditResult)
         except (CoreUnavailable, RpcError) as e:
-            self.notify(str(e.message if isinstance(e, RpcError) else e), severity="error")
+            self._fail("change the plan", e)
             return
         self.notify(f"plan changed: {res.summary}")
 
@@ -667,7 +713,7 @@ class KamaTui(App[None]):
         try:
             res = await self.rpc(RUN_CANCEL, RunCancelParams(run_id=run_id), RunCancelResult)
         except (CoreUnavailable, RpcError) as e:
-            self.notify(f"could not stop the run: {e}", severity="error")
+            self._fail("stop the run", e)
             return
         self.notify("stopping the run" if res.cancelled else "the run had already ended")
 
@@ -694,7 +740,7 @@ class KamaTui(App[None]):
         try:
             res = await self.rpc(RUN_LIST, RunListParams(), RunListResult)
         except (CoreUnavailable, RpcError) as e:
-            self.notify(f"could not list runs: {e}", severity="error")
+            self._fail("list runs", e)
             return
         if not res.runs:
             self.notify("no runs since kama-core started")

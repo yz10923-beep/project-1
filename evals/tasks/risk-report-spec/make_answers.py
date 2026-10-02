@@ -70,6 +70,19 @@ def main() -> None:
             ]
         },
     )
+    # Observed in the wild: Haiku 4.5 did this in 6/6 trials (S3 A/B). Summing realized
+    # P&L over open positions drops fully closed ones, which still carry realized P&L.
+    variant(
+        "wrong/realized-over-open-positions",
+        {
+            MAIN: [
+                (
+                    "sum(realized_pnl(trades, s) for s in {t.symbol for t in trades})",
+                    "sum(realized_pnl(trades, s) for s in pos)",
+                )
+            ]
+        },
+    )
     variant(
         "wrong/traceback-on-missing-price",
         {

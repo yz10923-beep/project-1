@@ -156,17 +156,32 @@ Design choices worth defending:
 - **The TUI folds events into a pure `RunView`** and only renders; dedupe on reconnect,
   cost, plan and pending approvals are unit-tested without a terminal.
 
-A/B results so far (user's VM, 3 reps × 9 tasks):
-- Opus 5: 27/27 without planning. The suite is saturated for Opus, so it can't show an
-  effect either way (a ceiling, not "no difference").
-- Haiku 4.5: 23/27 with and without planning (noise floor ±19%). With planning: a plan in
-  10/27 trials (median 7.5 tasks), task_* = 24% of tool calls, 69/349 steps plan-only,
-  median cost +16%, **open tasks at the end in 4 trials but 0 reminders**. The reminder
-  fires on every end_turn with open tasks, so those 4 must have ended another way; most
-  likely `max_steps` (to be confirmed from results.jsonl; the summary now prints "ended
-  at max_steps" directly). The failure the reminder was built for never happened; the one
-  that did was budget exhaustion, which the step allowance addresses.
-- Next: re-run the Haiku pair on this version (allowance, batched updates, deps).
+A/B results (user's VM, Haiku 4.5, 3 reps × 9 tasks; `evals/results/kama-run/`):
+
+| | round 1 (no allowance) | round 2 (with allowance) |
+|---|---|---|
+| no plan | 23/27 (`s3-noplan-haiku`) | 22/27 (`s3b-no-plan`) |
+| plan | 23/27 (`s3-plan-haiku`) | 24/27 (`s3a-plan-haiku`) |
+
+- **Pass rate: no measurable effect** (differences within the ±19% noise floor). Opus 5 is
+  at the ceiling (27/27 without planning), so the suite can't tell either way for it.
+- **The step allowance did what it was built for.** Round 1: the four "open tasks at the
+  end, no reminder" trials all ended at `max_steps`, and `rename-across-files` dropped to
+  1/3 with 8-9 of its 20 steps spent on bookkeeping. Round 2: 3/3, with 9-10 steps credited.
+  Cost per trial ends up about equal ($1.22 vs $1.25 per 27 trials).
+- **The reminder never fired** in 54 planning trials. The failure it was designed for
+  (saying "done" with work open) didn't happen; the one that did was budget exhaustion.
+- **Planning fixes completeness, not comprehension.** `risk-report-spec` failed R8/R9 in
+  every Haiku trial, with or without a plan: it summed realized P&L over *open* positions,
+  dropping fully closed ones (KO), so 39.5 instead of 177.0 on the visible data. The plan
+  faithfully contained the wrong interpretation. Opus spotted the same trap unprompted.
+  Now a `wrong/realized-over-open-positions` answer, and the checker's reason names the
+  field: `R8: realized_pnl 1120.0 != 1270.0`.
+- **`cleanup-trap` (plan 6/6, no plan 3/6) is confounded:** 4 of the 6 planning-arm trials
+  never made a plan, so the difference is the prompt/tool list or chance, not planning. One
+  no-plan failure deleted `.git`, which is S5's job to block.
+- **Decision:** planning stays on by default: neutral on pass rate, cost-neutral with the
+  allowance, and the plan panel and steering need it.
 
 Bugs found by the tests and the screenshots:
 - The runs picker sorted by run id, which has 1-second resolution plus a random suffix,
@@ -181,7 +196,7 @@ Bugs found by the tests and the screenshots:
   the watch connected); several expectations of mine were wrong (version counts, what
   counts as a plan-only step, when a mid-call edit reaches the model: the *next* call).
 
-### The S3 experiment (run on the VM; costs money)
+### Re-running the S3 experiment (VM; costs money)
 
 ```bash
 uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s3b-plan-haiku --model claude-haiku-4-5

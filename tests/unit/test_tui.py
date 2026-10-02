@@ -398,3 +398,44 @@ async def test_trace_view_shows_the_report_for_the_watched_run(rig_factory: Any)
         assert "where the time went" in text and "plan    2 tasks" in text
         await pilot.press("escape")
         await until(pilot, lambda: not isinstance(app.screen, TraceScreen))
+
+
+async def test_typing_a_goal_during_a_live_run_asks_what_it_means(rig_factory: Any) -> None:
+    """Typing into the goal box mid-run used to start a second run (seen on the VM);
+    now it asks: add a task to this run, or start a new one."""
+    from kama_claude.tui.app import ChoiceScreen
+
+    def script() -> ScriptedProvider:
+        return PausingProvider(
+            [
+                tool_response(("c", "task_create", {"tasks": [{"title": "a"}]})),
+                text_response("done"),
+                text_response("done again"),
+            ],
+            pause_at={1},
+        )
+
+    rig = await rig_factory(script)
+    app = rig.tui(goal="g", auto_approve=True)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await until(pilot, lambda: bool(rig.providers) and "0/1" in panel(app, "#plan"))
+        first = app.view.run_id if app.view else ""
+        await pilot.click("#goal")
+        await pilot.press(*"check closed positions", "enter")
+        await until(pilot, lambda: isinstance(app.screen, ChoiceScreen))
+        await pilot.press("t")
+        await until(pilot, lambda: "check closed positions" in panel(app, "#plan"))
+        assert app.view is not None and app.view.run_id == first  # no second run
+        rig.providers[0].resume.set()  # type: ignore[attr-defined]
+        await until(pilot, lambda: app.view is not None and app.view.finished)
+
+
+async def test_unreachable_daemon_says_how_to_start_it(tmp_path: Path) -> None:
+    from tests.conftest import free_port
+
+    app = KamaTui(lambda: JsonRpcClient("127.0.0.1", free_port(), token="x"), tmp_path, goal="g")
+    seen: list[str] = []
+    app.notify = lambda message, **kw: seen.append(message)  # type: ignore[method-assign]
+    async with app.run_test(size=(140, 40)) as pilot:
+        await until(pilot, lambda: bool(seen))
+    assert "could not start the run" in seen[0] and "uv run kama-core" in seen[0]
