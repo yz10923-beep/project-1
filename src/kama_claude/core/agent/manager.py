@@ -30,6 +30,8 @@ from kama_claude.core.agent.runner import (
     build_loop,
     make_provider,
     new_run_id,
+    note_store,
+    prepare_run,
     run_tracer,
     runs_root,
 )
@@ -44,7 +46,9 @@ from kama_claude.core.bus.events import (
 )
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.types import LLMProvider, ToolCall
+from kama_claude.core.notes import Note, NoteError, NoteScope, NoteStore
 from kama_claude.core.plan import NewTask, PlanError, PlanTask, TaskChange
+from kama_claude.core.session import SessionInfo, SessionStore, UnknownSession
 from kama_claude.core.trace.tracer import Tracer
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,10 @@ type SendEnd = Callable[[StreamEnd], Awaitable[None]]
 
 class UnknownRun(Exception):
     pass
+
+
+class SessionError(Exception):
+    """A run.start that a session can't take (busy, other workspace, unknown)."""
 
 
 class _Lagged:
@@ -129,6 +137,7 @@ class RunHandle:
     tracer: Tracer = field(default_factory=Tracer.noop)
     plan: list[PlanTask] = field(default_factory=list)  # latest plan.updated snapshot
     loop: AgentLoop | None = None
+    session_id: str | None = None
 
     def info(self) -> RunInfo:
         return RunInfo(
@@ -140,6 +149,7 @@ class RunHandle:
             pending_approvals=len(self.pending),
             plan_done=sum(t.status == "completed" for t in self.plan) if self.plan else None,
             plan_total=len(self.plan) if self.plan else None,
+            session_id=self.session_id,
         )
 
 
@@ -173,6 +183,9 @@ class RunManager:
         # ~50-80ms (TLS setup), and a shared one keeps its connection pool, so later runs
         # skip the TLS handshake too. Found via the trace: run.start took 83ms.
         self._clients: dict[str | None, anthropic.AsyncAnthropic] = {}
+        self.sessions = SessionStore(settings.sessions_dir)
+        self.notes = note_store(settings)
+        self._active: dict[str, str] = {}  # session_id -> its run in progress
 
     def warm_up(self) -> None:
         """Build the default SDK client at daemon start, not during the first run.start."""
@@ -185,7 +198,7 @@ class RunManager:
             self._clients[key] = anthropic.AsyncAnthropic(api_key=key)
         return make_provider(settings, client=self._clients[key])
 
-    def start(
+    async def start(
         self,
         goal: str,
         workspace: Path,
@@ -193,12 +206,36 @@ class RunManager:
         auto_approve: bool,
         model: str | None = None,
         max_steps: int | None = None,
+        session_id: str | None = None,
+        new_session: bool = False,
     ) -> RunHandle:
+        """Start a run (in a session: continuing its history, at most one run at a time).
+        Raises SessionError if the session can't take it."""
         overrides = {k: v for k, v in {"model": model, "max_steps": max_steps}.items() if v}
         settings = self._settings.model_copy(update=overrides)
         run_id = new_run_id()
         run_dir = runs_root(settings, workspace) / run_id
-        handle = RunHandle(run_id, goal, workspace, run_dir, auto_approve)
+        if new_session:
+            session_id = (await asyncio.to_thread(self.sessions.create, workspace)).session_id
+        if session_id is not None:
+            info = await self._session(session_id)
+            if info.workspace != str(workspace):  # callers pass a resolved workspace
+                raise SessionError(f"session {session_id} works in {info.workspace}")
+            # Check and reserve with no await in between: two concurrent starts can't both pass.
+            if (live := self._active.get(session_id)) is not None:
+                raise SessionError(f"session {session_id} already has a run in progress: {live}")
+            self._active[session_id] = run_id
+        try:
+            context = await asyncio.to_thread(
+                prepare_run, settings, workspace, session_id, self.sessions, self.notes
+            )
+            if session_id is not None:
+                await asyncio.to_thread(self.sessions.add_run, session_id, run_id, run_dir, goal)
+        except BaseException:
+            if session_id is not None:
+                self._active.pop(session_id, None)
+            raise
+        handle = RunHandle(run_id, goal, workspace, run_dir, auto_approve, session_id=session_id)
         handle.tracer = run_tracer(run_id, run_dir)
         writer = JsonlEventWriter(run_dir / "events.jsonl")
 
@@ -212,11 +249,18 @@ class RunManager:
             approver=approve,
             provider=self._provider_factory(settings),
             tracer=handle.tracer,
+            notes=self.notes,
         )
 
         async def drive() -> RunResult:
             try:
-                result = await loop.run(goal, run_id)
+                result = await loop.run(
+                    goal,
+                    run_id,
+                    history=context.history,
+                    preamble=context.preamble,
+                    session_id=session_id,
+                )
                 handle.status = result.status
                 return result
             except asyncio.CancelledError:
@@ -226,11 +270,81 @@ class RunManager:
                 writer.close()
                 for fut in handle.pending.values():
                     fut.cancel()
+                if session_id is not None:
+                    self.sessions.finish_run(session_id, run_id, handle.status)
+                    self._active.pop(session_id, None)
 
         handle.loop = loop
         handle.task = asyncio.create_task(drive(), name=f"run-{run_id}")
         self.runs[run_id] = handle
         return handle
+
+    async def _session(self, session_id: str) -> SessionInfo:
+        try:
+            return await asyncio.to_thread(self.sessions.get, session_id)
+        except UnknownSession as e:
+            raise SessionError(f"unknown session: {session_id}") from e
+
+    def active_run(self, session_id: str) -> str | None:
+        return self._active.get(session_id)
+
+    # ---- notes, as the user sees them (their changes apply from the next run)
+
+    def _notes(self) -> NoteStore:
+        if self.notes is None:
+            raise NoteError("memory is off (KAMA_MEMORY=false)")
+        return self.notes
+
+    async def list_notes(self, workspace: Path, session_id: str | None) -> list[Note]:
+        return await asyncio.to_thread(self._notes().visible, workspace, session_id)
+
+    async def add_note(
+        self,
+        workspace: Path,
+        *,
+        text: str,
+        scope: NoteScope,
+        session_id: str | None,
+        source: str,
+        volatile: bool,
+    ) -> Note:
+        return await asyncio.to_thread(
+            lambda: self._notes().add(
+                workspace,
+                scope=scope,
+                text=text,
+                session_id=session_id,
+                source=source,
+                volatile=volatile,
+                by="user",
+            )
+        )
+
+    async def update_note(
+        self,
+        workspace: Path,
+        note_id: str,
+        *,
+        session_id: str | None,
+        text: str | None,
+        source: str | None,
+        volatile: bool | None,
+    ) -> Note:
+        return await asyncio.to_thread(
+            lambda: self._notes().update(
+                workspace,
+                note_id,
+                session_id=session_id,
+                text=text,
+                source=source,
+                volatile=volatile,
+            )
+        )
+
+    async def delete_note(self, workspace: Path, note_id: str, session_id: str | None) -> Note:
+        return await asyncio.to_thread(
+            lambda: self._notes().delete(workspace, note_id, session_id=session_id)
+        )
 
     async def _await_approval(self, handle: RunHandle, call: ToolCall) -> ApprovalDecision:
         if handle.auto_approve:

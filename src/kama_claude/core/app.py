@@ -14,11 +14,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kama_claude import __version__
-from kama_claude.core.agent.manager import RunManager, UnknownRun
+from kama_claude.core.agent.manager import RunManager, SessionError, UnknownRun
 from kama_claude.core.agent.runner import TRACE_FILE
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
+    NOTES_ADD,
+    NOTES_DELETE,
+    NOTES_LIST,
+    NOTES_UPDATE,
     PING,
     PLAN_EDIT,
     PLAN_GET,
@@ -26,9 +30,18 @@ from kama_claude.core.bus.commands import (
     RUN_LIST,
     RUN_START,
     RUN_SUBSCRIBE,
+    SESSION_CREATE,
+    SESSION_GET,
+    SESSION_LIST,
     STREAM_END_NOTIFICATION,
     ApprovalRespondParams,
     ApprovalRespondResult,
+    NoteResult,
+    NotesAddParams,
+    NotesDeleteParams,
+    NotesListParams,
+    NotesListResult,
+    NotesUpdateParams,
     PingParams,
     PlanEditParams,
     PlanEditResult,
@@ -43,12 +56,19 @@ from kama_claude.core.bus.commands import (
     RunStartResult,
     RunSubscribeParams,
     RunSubscribeResult,
+    SessionCreateParams,
+    SessionGetParams,
+    SessionListParams,
+    SessionListResult,
+    SessionView,
     StreamEnd,
 )
 from kama_claude.core.bus.events import Event
 from kama_claude.core.config import ConfigError, Settings, load_settings
 from kama_claude.core.llm.types import LLMProvider
+from kama_claude.core.notes import NoteError
 from kama_claude.core.plan import PlanError
+from kama_claude.core.session import SessionInfo, UnknownSession
 from kama_claude.core.trace.tracer import JsonlSpanWriter, Tracer
 from kama_claude.core.transport.server import Connection, JsonRpcServer, RequestError, RpcRecord
 
@@ -92,6 +112,13 @@ class CoreApp:
         self.server.register(APPROVAL_RESPOND, ApprovalRespondParams, self.on_approval_respond)
         self.server.register(PLAN_GET, PlanGetParams, self.on_plan_get)
         self.server.register(PLAN_EDIT, PlanEditParams, self.on_plan_edit)
+        self.server.register(SESSION_CREATE, SessionCreateParams, self.on_session_create)
+        self.server.register(SESSION_LIST, SessionListParams, self.on_session_list)
+        self.server.register(SESSION_GET, SessionGetParams, self.on_session_get)
+        self.server.register(NOTES_LIST, NotesListParams, self.on_notes_list)
+        self.server.register(NOTES_ADD, NotesAddParams, self.on_notes_add)
+        self.server.register(NOTES_UPDATE, NotesUpdateParams, self.on_notes_update)
+        self.server.register(NOTES_DELETE, NotesDeleteParams, self.on_notes_delete)
         # IPC spans: into the run's trace when the request names a run, else the daemon's.
         self.daemon_tracer = Tracer(
             "daemon", JsonlSpanWriter(settings.runs_dir.expanduser() / "_daemon" / TRACE_FILE)
@@ -123,15 +150,22 @@ class CoreApp:
 
     async def on_run_start(self, params: RunStartParams, conn: Connection) -> RunStartResult:
         workspace = await asyncio.to_thread(_checked_workspace, params.workspace)
-        handle = self.runs.start(
-            params.goal,
-            workspace,
-            auto_approve=params.auto_approve,
-            model=params.model,
-            max_steps=params.max_steps,
-        )
+        try:
+            handle = await self.runs.start(
+                params.goal,
+                workspace,
+                auto_approve=params.auto_approve,
+                model=params.model,
+                max_steps=params.max_steps,
+                session_id=params.session_id,
+                new_session=params.new_session,
+            )
+        except SessionError as e:
+            raise RequestError(str(e)) from e
         logger.info("run %s started by %s in %s", handle.run_id, conn.client, workspace)
-        return RunStartResult(run_id=handle.run_id, run_dir=str(handle.run_dir))
+        return RunStartResult(
+            run_id=handle.run_id, run_dir=str(handle.run_dir), session_id=handle.session_id
+        )
 
     async def on_run_subscribe(
         self, params: RunSubscribeParams, conn: Connection
@@ -191,6 +225,81 @@ class CoreApp:
             raise RequestError(f"plan edit rejected: {e}") from e
         logger.info("plan of %s edited by %s: %s", params.run_id, conn.client, summary)
         return PlanEditResult(tasks=tasks, summary=summary)
+
+    # ---- sessions
+
+    def _view(self, info: SessionInfo) -> SessionView:
+        return SessionView(**info.model_dump(), active_run_id=self.runs.active_run(info.session_id))
+
+    async def on_session_create(self, params: SessionCreateParams, conn: Connection) -> SessionView:
+        workspace = await asyncio.to_thread(_checked_workspace, params.workspace)
+        info = await asyncio.to_thread(self.runs.sessions.create, workspace, params.title)
+        return self._view(info)
+
+    async def on_session_list(
+        self, params: SessionListParams, conn: Connection
+    ) -> SessionListResult:
+        ws = (
+            await asyncio.to_thread(_checked_workspace, params.workspace)
+            if params.workspace
+            else None
+        )
+        found = await asyncio.to_thread(self.runs.sessions.list_sessions, ws)
+        return SessionListResult(sessions=[self._view(s) for s in found])
+
+    async def on_session_get(self, params: SessionGetParams, conn: Connection) -> SessionView:
+        try:
+            info = await asyncio.to_thread(self.runs.sessions.get, params.session_id)
+        except UnknownSession as e:
+            raise RequestError(f"unknown session: {params.session_id}") from e
+        return self._view(info)
+
+    # ---- notes (the user's edits apply from the next run)
+
+    async def on_notes_list(self, params: NotesListParams, conn: Connection) -> NotesListResult:
+        ws = await asyncio.to_thread(_checked_workspace, params.workspace)
+        try:
+            return NotesListResult(notes=await self.runs.list_notes(ws, params.session_id))
+        except NoteError as e:
+            raise RequestError(str(e)) from e
+
+    async def on_notes_add(self, params: NotesAddParams, conn: Connection) -> NoteResult:
+        ws = await asyncio.to_thread(_checked_workspace, params.workspace)
+        try:
+            note = await self.runs.add_note(
+                ws,
+                text=params.text,
+                scope=params.scope,
+                session_id=params.session_id,
+                source=params.source,
+                volatile=params.volatile,
+            )
+        except NoteError as e:
+            raise RequestError(str(e)) from e
+        return NoteResult(note=note)
+
+    async def on_notes_update(self, params: NotesUpdateParams, conn: Connection) -> NoteResult:
+        ws = await asyncio.to_thread(_checked_workspace, params.workspace)
+        try:
+            note = await self.runs.update_note(
+                ws,
+                params.note_id,
+                session_id=params.session_id,
+                text=params.text,
+                source=params.source,
+                volatile=params.volatile,
+            )
+        except NoteError as e:
+            raise RequestError(str(e)) from e
+        return NoteResult(note=note)
+
+    async def on_notes_delete(self, params: NotesDeleteParams, conn: Connection) -> NoteResult:
+        ws = await asyncio.to_thread(_checked_workspace, params.workspace)
+        try:
+            note = await self.runs.delete_note(ws, params.note_id, params.session_id)
+        except NoteError as e:
+            raise RequestError(str(e)) from e
+        return NoteResult(note=note)
 
     def request_stop(self) -> None:
         self._stop.set()

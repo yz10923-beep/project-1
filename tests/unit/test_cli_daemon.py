@@ -138,7 +138,7 @@ async def test_kama_plan_shows_and_steers_a_live_run(
     write_token(tmp_path / "tok", app.token)
     settings = app.settings.model_copy(update={"port": port})
     try:
-        run_id = app.runs.start("g", ws, auto_approve=True).run_id
+        run_id = (await app.runs.start("g", ws, auto_approve=True)).run_id
         await provider.paused.wait()
         parse = cli.build_parser().parse_args
         assert (

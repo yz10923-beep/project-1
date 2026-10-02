@@ -18,15 +18,28 @@ from kama_claude.core.app import CoreApp
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
+    NOTES_ADD,
+    NOTES_DELETE,
+    NOTES_LIST,
+    NOTES_UPDATE,
     PLAN_EDIT,
     PLAN_GET,
     RUN_CANCEL,
     RUN_LIST,
     RUN_START,
     RUN_SUBSCRIBE,
+    SESSION_CREATE,
+    SESSION_GET,
+    SESSION_LIST,
     STREAM_END_NOTIFICATION,
     ApprovalRespondParams,
     ApprovalRespondResult,
+    NoteResult,
+    NotesAddParams,
+    NotesDeleteParams,
+    NotesListParams,
+    NotesListResult,
+    NotesUpdateParams,
     PlanEditParams,
     PlanEditResult,
     PlanGetParams,
@@ -39,6 +52,11 @@ from kama_claude.core.bus.commands import (
     RunStartResult,
     RunSubscribeParams,
     RunSubscribeResult,
+    SessionCreateParams,
+    SessionGetParams,
+    SessionListParams,
+    SessionListResult,
+    SessionView,
     StreamEnd,
 )
 from kama_claude.core.bus.envelope import INVALID_PARAMS
@@ -512,3 +530,136 @@ async def test_user_steers_a_live_plan_over_ipc(daemon_factory: Any) -> None:
         with pytest.raises(RpcError) as exc:
             await c.call(PLAN_GET, PlanGetParams(run_id="nope"), PlanGetResult)
         assert "unknown run" in exc.value.message
+
+
+# ---------------------------------------------------------------- S4: sessions and notes
+
+
+async def finished(c: JsonRpcClient, run_id: str) -> None:
+    _, end = await collect(c, run_id)
+    assert end is not None and end.reason == "finished"
+
+
+async def test_session_continues_over_ipc_one_run_at_a_time(daemon_factory: Any) -> None:
+    def script() -> ScriptedProvider:
+        return PausingProvider([text_response("answer")], pause_at={0})
+
+    d = await daemon_factory(script)
+    async with d.client("cli") as c:
+        first = await c.call(
+            RUN_START,
+            RunStartParams(goal="one", workspace=str(d.ws), auto_approve=True, new_session=True),
+            RunStartResult,
+        )
+        sid = first.session_id
+        assert sid is not None
+        await until_paused(d, 0)
+        # a second run in the same session while the first is live: refused, clearly
+        with pytest.raises(RpcError) as exc:
+            await c.call(
+                RUN_START,
+                RunStartParams(goal="two", workspace=str(d.ws), session_id=sid),
+                RunStartResult,
+            )
+        assert exc.value.code == INVALID_PARAMS
+        assert f"already has a run in progress: {first.run_id}" in exc.value.message
+        view = await c.call(SESSION_GET, SessionGetParams(session_id=sid), SessionView)
+        assert view.active_run_id == first.run_id
+        d.providers[0].resume.set()  # type: ignore[attr-defined]
+        await finished(c, first.run_id)
+
+        second = await c.call(
+            RUN_START,
+            RunStartParams(goal="two", workspace=str(d.ws), auto_approve=True, session_id=sid),
+            RunStartResult,
+        )
+        d.providers[1].resume.set()  # type: ignore[attr-defined]
+        await finished(c, second.run_id)
+        sent = d.providers[1].requests[0].messages
+        assert [m["role"] for m in sent] == ["user", "assistant", "user"]  # run 1, then run 2
+        assert sent[1]["content"][0]["text"] == "answer"
+        [info] = [
+            r
+            for r in (await c.call(RUN_LIST, RunListParams(), RunListResult)).runs
+            if r.run_id == second.run_id
+        ]
+        assert info.session_id == sid
+        view = await c.call(SESSION_GET, SessionGetParams(session_id=sid), SessionView)
+        assert [r.run_id for r in view.runs] == [first.run_id, second.run_id]
+        assert view.active_run_id is None
+        listed = await c.call(
+            SESSION_LIST, SessionListParams(workspace=str(d.ws)), SessionListResult
+        )
+        assert [s.session_id for s in listed.sessions] == [sid]
+
+    d2 = await daemon_factory(script)  # restarted daemon: the session is on disk
+    async with d2.client() as c:
+        third = await c.call(
+            RUN_START,
+            RunStartParams(goal="three", workspace=str(d2.ws), auto_approve=True, session_id=sid),
+            RunStartResult,
+        )
+        d2.providers[0].resume.set()  # type: ignore[attr-defined]
+        await finished(c, third.run_id)
+        assert len(d2.providers[0].requests[0].messages) == 5  # runs 1 and 2, then 3
+
+
+async def until_paused(d: Daemon, index: int) -> None:
+    for _ in range(500):
+        if len(d.providers) > index and d.providers[index].paused.is_set():  # type: ignore[attr-defined]
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("provider never paused")
+
+
+async def test_session_errors_are_clear(daemon_factory: Any, tmp_path: Path) -> None:
+    d = await daemon_factory(two_step)
+    other = tmp_path / "other"
+    other.mkdir()
+    async with d.client() as c:
+        sid = (
+            await c.call(SESSION_CREATE, SessionCreateParams(workspace=str(d.ws)), SessionView)
+        ).session_id
+        for params, expected in [
+            (RunStartParams(goal="g", workspace=str(other), session_id=sid), "works in"),
+            (RunStartParams(goal="g", workspace=str(d.ws), session_id="s-nope"), "unknown session"),
+        ]:
+            with pytest.raises(RpcError) as exc:
+                await c.call(RUN_START, params, RunStartResult)
+            assert exc.value.code == INVALID_PARAMS and expected in exc.value.message
+        with pytest.raises(RpcError) as exc:
+            await c.call(SESSION_GET, SessionGetParams(session_id="s-nope"), SessionView)
+        assert "unknown session" in exc.value.message
+
+
+async def test_user_notes_over_ipc_reach_the_next_run(daemon_factory: Any) -> None:
+    d = await daemon_factory(lambda: ScriptedProvider([text_response("ok")]))
+    ws = str(d.ws)
+    async with d.client("cli") as c:
+        added = await c.call(
+            NOTES_ADD,
+            NotesAddParams(workspace=ws, text="Reports go to the risk desk by 17:00", source="me"),
+            NoteResult,
+        )
+        assert (added.note.id, added.note.by) == ("w1", "user")
+        await c.call(
+            NOTES_UPDATE, NotesUpdateParams(workspace=ws, note_id="w1", volatile=True), NoteResult
+        )
+        run_id = await start(c, d)
+        await finished(c, run_id)
+        preamble = d.providers[0].requests[0].messages[0]["content"][0]["text"]
+        assert "[w1] [volatile] Reports go to the risk desk by 17:00  (you (the user)" in preamble
+        await c.call(NOTES_DELETE, NotesDeleteParams(workspace=ws, note_id="w1"), NoteResult)
+        listed = await c.call(NOTES_LIST, NotesListParams(workspace=ws), NotesListResult)
+        assert listed.notes == []
+        with pytest.raises(RpcError) as exc:
+            await c.call(NOTES_DELETE, NotesDeleteParams(workspace=ws, note_id="w7"), NoteResult)
+        assert exc.value.code == INVALID_PARAMS and "no note w7" in exc.value.message
+
+
+async def test_notes_commands_say_when_memory_is_off(daemon_factory: Any) -> None:
+    d = await daemon_factory(two_step, memory=False)
+    async with d.client() as c:
+        with pytest.raises(RpcError) as exc:
+            await c.call(NOTES_LIST, NotesListParams(workspace=str(d.ws)), NotesListResult)
+        assert "memory is off" in exc.value.message

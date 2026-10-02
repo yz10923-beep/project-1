@@ -11,7 +11,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kama_claude.core.notes import Note, NoteScope
 from kama_claude.core.plan import NewTask, PlanTask, TaskChange
+from kama_claude.core.session import SessionInfo
 
 
 class _Params(BaseModel):
@@ -56,11 +58,15 @@ class RunStartParams(_Params):
     model: str | None = None
     max_steps: int | None = Field(default=None, ge=1)
     auto_approve: bool = Field(default=False, description="Approve bash/write_file without asking.")
+    # S4: continue a session (its history and notes), or start a new one for this run.
+    session_id: str | None = Field(default=None, description="Continue this session.")
+    new_session: bool = Field(default=False, description="Start a session with this run.")
 
 
 class RunStartResult(BaseModel):
     run_id: str
     run_dir: str
+    session_id: str | None = None
 
 
 RUN_SUBSCRIBE = "run.subscribe"
@@ -103,6 +109,7 @@ class RunInfo(BaseModel):
     pending_approvals: int
     plan_done: int | None = Field(default=None, description="Completed tasks; None: no plan.")
     plan_total: int | None = None
+    session_id: str | None = None
 
 
 class RunListResult(BaseModel):
@@ -149,6 +156,79 @@ class PlanEditParams(_Params):
 class PlanEditResult(BaseModel):
     tasks: list[PlanTask]
     summary: str = Field(description="What changed; the model is told at its next call.")
+
+
+# ---- sessions (S4): runs that share a conversation
+
+SESSION_CREATE = "session.create"
+SESSION_LIST = "session.list"
+SESSION_GET = "session.get"
+
+
+class SessionView(SessionInfo):
+    active_run_id: str | None = Field(default=None, description="Its run in progress, if any.")
+
+
+class SessionCreateParams(_Params):
+    workspace: str
+    title: str = ""
+
+
+class SessionListParams(_Params):
+    workspace: str | None = Field(default=None, description="Only sessions in this directory.")
+
+
+class SessionListResult(BaseModel):
+    sessions: list[SessionView]
+
+
+class SessionGetParams(_Params):
+    session_id: str
+
+
+# ---- durable notes (S4): the user's view of the agent's memory
+
+NOTES_LIST = "notes.list"
+NOTES_ADD = "notes.add"
+NOTES_UPDATE = "notes.update"
+NOTES_DELETE = "notes.delete"
+
+
+class NotesListParams(_Params):
+    workspace: str
+    session_id: str | None = Field(default=None, description="Also show this session's notes.")
+
+
+class NotesListResult(BaseModel):
+    notes: list[Note]
+
+
+class NotesAddParams(_Params):
+    workspace: str
+    text: str = Field(min_length=1)
+    scope: NoteScope = "workspace"
+    session_id: str | None = None
+    source: str = ""
+    volatile: bool = False
+
+
+class NotesUpdateParams(_Params):
+    workspace: str
+    note_id: str
+    session_id: str | None = None
+    text: str | None = None
+    source: str | None = None
+    volatile: bool | None = None
+
+
+class NotesDeleteParams(_Params):
+    workspace: str
+    note_id: str
+    session_id: str | None = None
+
+
+class NoteResult(BaseModel):
+    note: Note
 
 
 # ---- server -> client notifications (no response)
