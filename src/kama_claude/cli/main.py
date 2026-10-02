@@ -11,6 +11,7 @@ import json
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kama_claude import __version__
@@ -20,6 +21,10 @@ from kama_claude.core.agent.sinks import ConsolePrinter
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
+    NOTES_ADD,
+    NOTES_DELETE,
+    NOTES_LIST,
+    NOTES_UPDATE,
     PING,
     PLAN_EDIT,
     PLAN_GET,
@@ -27,9 +32,18 @@ from kama_claude.core.bus.commands import (
     RUN_LIST,
     RUN_START,
     RUN_SUBSCRIBE,
+    SESSION_CREATE,
+    SESSION_GET,
+    SESSION_LIST,
     STREAM_END_NOTIFICATION,
     ApprovalRespondParams,
     ApprovalRespondResult,
+    NoteResult,
+    NotesAddParams,
+    NotesDeleteParams,
+    NotesListParams,
+    NotesListResult,
+    NotesUpdateParams,
     PingParams,
     PlanEditParams,
     PlanEditResult,
@@ -44,6 +58,11 @@ from kama_claude.core.bus.commands import (
     RunStartResult,
     RunSubscribeParams,
     RunSubscribeResult,
+    SessionCreateParams,
+    SessionGetParams,
+    SessionListParams,
+    SessionListResult,
+    SessionView,
     StreamEnd,
 )
 from kama_claude.core.bus.events import (
@@ -54,7 +73,9 @@ from kama_claude.core.bus.events import (
 )
 from kama_claude.core.config import ConfigError, Settings, load_settings
 from kama_claude.core.llm.types import ToolCall
+from kama_claude.core.notes import Note, render_note
 from kama_claude.core.plan import NewTask, TaskChange, render_tasks
+from kama_claude.core.session import SessionStore
 from kama_claude.core.trace.analyze import load_spans, render, to_chrome
 from kama_claude.core.transport.client import CoreUnavailable, JsonRpcClient, RpcError, read_token
 
@@ -190,12 +211,16 @@ async def _run(settings: Settings, args: argparse.Namespace) -> int:
                 model=args.model,
                 max_steps=args.max_steps,
                 auto_approve=args.yes,
+                session_id=args.session,
+                new_session=args.new_session,
             ),
             RunStartResult,
         )
         if args.detach:
             print(started.run_id)
             return EXIT_OK
+        if args.new_session:
+            print(f"session {started.session_id} (continue it with --session)")
         answer = make_answerer(args.yes, deny_if_not_tty=True)
         try:
             finished = await watch(client, started.run_id, 0, answer)
@@ -287,7 +312,170 @@ def _tui(settings: Settings, args: argparse.Namespace) -> int:
         goal=args.goal,
         auto_approve=args.yes,
         trace_report=trace_report,
+        session_id=args.session,
     ).run()
+    return EXIT_OK
+
+
+class UsageError(Exception):
+    """Bad arguments (exit 2), as opposed to the daemon being unreachable (exit 3)."""
+
+
+def _workspace(raw: str) -> Path:
+    ws = Path(raw).resolve()
+    if not ws.is_dir():
+        raise UsageError(f"workspace is not a directory: {ws}")
+    return ws
+
+
+async def _chat(settings: Settings, args: argparse.Namespace) -> int:
+    """A conversation: every line is a run in one session, so each run sees the ones
+    before it. /notes, /note TEXT, /new, /quit. Ctrl+C stops the current run and leaves;
+    `kama chat --session ID` picks the conversation up again."""
+    ws = _workspace(args.workspace)
+    async with connect(settings) as client:
+        if args.session:
+            view = await client.call(
+                SESSION_GET, SessionGetParams(session_id=args.session), SessionView
+            )
+            session_id = view.session_id
+            print(f"session {session_id} · continuing after {len(view.runs)} run(s)")
+        else:
+            session_id = (
+                await client.call(
+                    SESSION_CREATE, SessionCreateParams(workspace=str(ws)), SessionView
+                )
+            ).session_id
+            print(f"session {session_id} · new, in {ws}")
+        print("type a goal · /notes · /note TEXT · /new (fresh conversation) · /quit")
+        answer = make_answerer(args.yes, deny_if_not_tty=True)
+        while True:
+            try:
+                line = (await asyncio.to_thread(input, "\nyou> ")).strip()
+            except EOFError:
+                break
+            if not line:
+                continue
+            if line in ("/quit", "/exit"):
+                break
+            if line == "/new":
+                session_id = (
+                    await client.call(
+                        SESSION_CREATE, SessionCreateParams(workspace=str(ws)), SessionView
+                    )
+                ).session_id
+                print(f"session {session_id} · new (notes in this workspace carry over)")
+                continue
+            if line == "/notes":
+                got = await client.call(
+                    NOTES_LIST,
+                    NotesListParams(workspace=str(ws), session_id=session_id),
+                    NotesListResult,
+                )
+                _print_notes(got.notes)
+                continue
+            if line.startswith("/note "):
+                res = await client.call(
+                    NOTES_ADD, NotesAddParams(workspace=str(ws), text=line[6:]), NoteResult
+                )
+                print(f"saved [{res.note.id}]; runs from now on will see it")
+                continue
+            started = await client.call(
+                RUN_START,
+                RunStartParams(
+                    goal=line, workspace=str(ws), auto_approve=args.yes, session_id=session_id
+                ),
+                RunStartResult,
+            )
+            try:
+                await watch(client, started.run_id, 0, answer)
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await client.call(
+                        RUN_CANCEL, RunCancelParams(run_id=started.run_id), RunCancelResult
+                    )
+                print(f"\ncancelled run {started.run_id}; resume with --session {session_id}")
+                raise
+    print(f"\nsession {session_id}: `kama chat --session {session_id}` to continue")
+    return EXIT_OK
+
+
+def _print_notes(notes: list[Note]) -> None:
+    if not notes:
+        print("no notes")
+        return
+    now = datetime.now(UTC)
+    for n in notes:
+        print(render_note(n, now))
+
+
+async def _session(settings: Settings, args: argparse.Namespace) -> int:
+    async with connect(settings) as client:
+        if args.session_command == "list":
+            ws = None if args.all else str(_workspace(args.workspace))
+            res = await client.call(
+                SESSION_LIST, SessionListParams(workspace=ws), SessionListResult
+            )
+            if not res.sessions:
+                print("no sessions" + ("" if args.all else " in this workspace (try --all)"))
+            for s in res.sessions:
+                live = f" · running {s.active_run_id}" if s.active_run_id else ""
+                print(f"{s.session_id}  {len(s.runs):>3} run(s)  {s.title[:60]!r}{live}")
+            return EXIT_OK
+        view = await client.call(
+            SESSION_GET, SessionGetParams(session_id=args.session_id), SessionView
+        )
+    print(f"session {view.session_id} · {view.workspace} · {len(view.runs)} run(s)")
+    for r in view.runs:
+        print(f"  {r.run_id}  {r.status:<10} {r.goal.strip().splitlines()[0][:70]!r}")
+    return EXIT_OK
+
+
+async def _notes(settings: Settings, args: argparse.Namespace) -> int:
+    ws = str(_workspace(args.workspace))
+    async with connect(settings) as client:
+        cmd = args.notes_command
+        if cmd == "list":
+            got = await client.call(
+                NOTES_LIST, NotesListParams(workspace=ws, session_id=args.session), NotesListResult
+            )
+            _print_notes(got.notes)
+            return EXIT_OK
+        if cmd == "add":
+            res = await client.call(
+                NOTES_ADD,
+                NotesAddParams(
+                    workspace=ws,
+                    text=args.text,
+                    scope="session" if args.session else "workspace",
+                    session_id=args.session,
+                    source=args.source,
+                    volatile=args.volatile,
+                ),
+                NoteResult,
+            )
+        elif cmd == "edit":
+            res = await client.call(
+                NOTES_UPDATE,
+                NotesUpdateParams(
+                    workspace=ws,
+                    note_id=args.note_id,
+                    session_id=args.session,
+                    text=args.text,
+                    source=args.source,
+                    volatile=args.volatile,
+                ),
+                NoteResult,
+            )
+        else:
+            res = await client.call(
+                NOTES_DELETE,
+                NotesDeleteParams(workspace=ws, note_id=args.note_id, session_id=args.session),
+                NoteResult,
+            )
+            print(f"deleted [{res.note.id}]")
+            return EXIT_OK
+    print(render_note(res.note, datetime.now(UTC)))
     return EXIT_OK
 
 
@@ -332,12 +520,20 @@ def make_approver(auto_yes: bool) -> Approver:
 
 async def _run_local(settings: Settings, args: argparse.Namespace) -> int:
     overrides = {k: v for k, v in {"model": args.model, "max_steps": args.max_steps}.items() if v}
+    settings = settings.model_copy(update=overrides)
+    store = SessionStore(settings.sessions_dir)
+    session_id = args.session
+    if args.new_session:
+        session_id = store.create(args.workspace).session_id
+        print(f"session {session_id} (continue it with --session)")
     result, run_dir = await run_goal(
         args.goal,
-        settings=settings.model_copy(update=overrides),
+        settings=settings,
         workspace=args.workspace,
         approver=make_approver(args.yes),
         extra_sink=ConsolePrinter(sys.stdout),
+        session_id=session_id,
+        sessions=store,
     )
     print(f"\nevents: {run_dir / 'events.jsonl'}")
     return EXIT_OK if result.status == "completed" else EXIT_FAILED
@@ -356,6 +552,42 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-steps", type=int, help="override KAMA_MAX_STEPS")
     run.add_argument("--detach", action="store_true", help="print the run id and exit")
     run.add_argument("--local", action="store_true", help="run in this process, no daemon")
+    in_session = run.add_mutually_exclusive_group()
+    in_session.add_argument("--session", metavar="ID", help="continue this session")
+    in_session.add_argument("--new-session", action="store_true", help="start a session")
+    chat = sub.add_parser("chat", help="a conversation: each line is a run in one session")
+    chat.add_argument("-w", "--workspace", default=".", help="directory the agent works in")
+    chat.add_argument("-y", "--yes", action="store_true", help="approve bash/write_file calls")
+    chat.add_argument("--session", metavar="ID", help="continue this session")
+    session = sub.add_parser("session", help="list sessions or show one")
+    session_sub = session.add_subparsers(dest="session_command", required=True)
+    s_list = session_sub.add_parser("list", help="sessions in a workspace, newest first")
+    s_list.add_argument("-w", "--workspace", default=".")
+    s_list.add_argument("--all", action="store_true", help="in every workspace")
+    s_show = session_sub.add_parser("show", help="a session's runs")
+    s_show.add_argument("session_id")
+    notes = sub.add_parser("notes", help="the agent's durable notes for a workspace")
+    notes_sub = notes.add_subparsers(dest="notes_command", required=True)
+    for name, help_text in (
+        ("list", "notes runs here will see"),
+        ("add", "add a note (yours); workspace scope unless --session"),
+        ("edit", "change a note"),
+        ("rm", "delete a note"),
+    ):
+        n = notes_sub.add_parser(name, help=help_text)
+        n.add_argument("-w", "--workspace", default=".")
+        n.add_argument("--session", metavar="ID", help="include / use this session's notes")
+        if name in ("edit", "rm"):
+            n.add_argument("note_id")
+        if name == "add":
+            n.add_argument("text")
+        if name == "edit":
+            n.add_argument("--text")
+        if name in ("add", "edit"):
+            n.add_argument("--source", default="" if name == "add" else None)
+            vol = n.add_mutually_exclusive_group()
+            vol.add_argument("--volatile", dest="volatile", action="store_true", default=None)
+            vol.add_argument("--stable", dest="volatile", action="store_false")
     attach = sub.add_parser("attach", help="watch a run (and answer its approvals)")
     attach.add_argument("run_id")
     attach.add_argument("--from-seq", type=int, default=0, help="replay from this event seq")
@@ -380,6 +612,7 @@ def build_parser() -> argparse.ArgumentParser:
     tui.add_argument("-w", "--workspace", default=".", help="directory new runs work in")
     tui.add_argument("-y", "--yes", action="store_true", help="auto-approve new runs")
     tui.add_argument("--goal", help="start a run with this goal right away")
+    tui.add_argument("--session", metavar="ID", help="continue this conversation")
     trace = sub.add_parser("trace", help="where a run's time and tokens went")
     trace.add_argument("run_id", nargs="?", help="default: the latest run")
     trace.add_argument("--chrome", metavar="FILE", help="write Chrome trace JSON (Perfetto)")
@@ -407,6 +640,9 @@ def main(argv: list[str] | None = None) -> None:
         "runs": _runs,
         "cancel": _cancel,
         "plan": _plan,
+        "chat": _chat,
+        "session": _session,
+        "notes": _notes,
     }
     if args.command == "trace":  # reads files only; no daemon, no event loop
         raise SystemExit(_trace(settings, args))
@@ -420,6 +656,9 @@ def main(argv: list[str] | None = None) -> None:
     except RpcError as e:
         print(f"kama: {e}", file=sys.stderr)
         code = EXIT_FAILED
+    except UsageError as e:
+        print(f"kama: {e}", file=sys.stderr)
+        code = EXIT_USAGE
     except KeyboardInterrupt:
         print("\nkama: interrupted", file=sys.stderr)
         code = EXIT_INTERRUPTED

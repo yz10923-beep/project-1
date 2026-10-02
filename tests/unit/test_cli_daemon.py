@@ -47,6 +47,8 @@ def run_args(ws: Path, **kw: Any) -> argparse.Namespace:
         yes=False,
         detach=False,
         local=False,
+        session=None,
+        new_session=False,
     )
     return argparse.Namespace(**{**base, **kw})
 
@@ -169,3 +171,96 @@ async def test_kama_plan_shows_and_steers_a_live_run(
     finally:
         await app.runs.shutdown()
         await app.server.stop()
+
+
+# ---------------------------------------------------------------- S4: chat, sessions, notes
+
+
+@pytest.fixture
+async def memory_core(tmp_path: Path) -> AsyncIterator[tuple[CoreApp, Settings, Path, list[Any]]]:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    providers: list[ScriptedProvider] = []
+
+    def factory(s: Settings) -> ScriptedProvider:
+        n = len(providers)
+        providers.append(ScriptedProvider([text_response(f"answer {n + 1}")]))
+        return providers[-1]
+
+    app = CoreApp(
+        Settings(port=0, runs_dir=tmp_path / "runs", token_file=tmp_path / "tok"),
+        provider_factory=factory,
+    )
+    _, port = await app.server.start()
+    write_token(tmp_path / "tok", app.token)
+    yield app, app.settings.model_copy(update={"port": port}), ws, providers
+    await app.runs.shutdown()
+    await app.server.stop()
+
+
+async def test_kama_chat_keeps_one_conversation(
+    memory_core: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, settings, ws, providers = memory_core
+    lines = iter(
+        ["what is 2+2?", "/note answers go in answers.txt", "/notes", "and twice that?", "/quit"]
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(lines))
+    args = cli.build_parser().parse_args(["chat", "-w", str(ws), "-y"])
+    assert await cli._chat(settings, args) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "answer 1" in out and "answer 2" in out
+    assert "saved [w1]; runs from now on will see it" in out
+    assert "- [w1] answers go in answers.txt  (you (the user)" in out
+    # the second question was sent with the first exchange before it, plus the note
+    second = providers[1].requests[0].messages
+    assert [m["role"] for m in second] == ["user", "assistant", "user"]
+    preamble, goal = second[-1]["content"]
+    assert "answers go in answers.txt" in preamble["text"]
+    assert goal == {"type": "text", "text": "and twice that?"}
+    sid = out.split("session ", 1)[1].split()[0]
+    assert f"`kama chat --session {sid}` to continue" in out
+
+
+async def test_kama_session_and_notes_commands(
+    memory_core: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    app, settings, ws, _ = memory_core
+    parse = cli.build_parser().parse_args
+    code = await cli._run(
+        settings, _resolved(parse(["run", "-y", "--new-session", "-w", str(ws), "first"]), ws)
+    )
+    assert code == cli.EXIT_OK
+    sid = capsys.readouterr().out.split("session ", 1)[1].split()[0]
+    await cli._run(
+        settings, _resolved(parse(["run", "-y", "--session", sid, "-w", str(ws), "second"]), ws)
+    )
+    capsys.readouterr()
+    assert await cli._session(settings, parse(["session", "list", "-w", str(ws)])) == 0
+    assert f"{sid}    2 run(s)  'first'" in capsys.readouterr().out
+    assert await cli._session(settings, parse(["session", "show", sid])) == 0
+    shown = capsys.readouterr().out
+    assert "completed  'first'" in shown and "completed  'second'" in shown
+
+    run = lambda *a: cli._notes(settings, parse(["notes", *a, "-w", str(ws)]))  # noqa: E731
+    assert await run("add", "fx comes from config/fx.toml", "--volatile", "--source", "me") == 0
+    assert await run("edit", "w1", "--stable") == 0
+    assert await run("list") == 0
+    out = capsys.readouterr().out
+    assert "- [w1] [volatile] fx comes from config/fx.toml" in out  # as added
+    assert out.rstrip().endswith("(you (the user), moments ago; source: me)")  # edited: stable
+    assert await run("rm", "w1") == 0
+    assert "deleted [w1]" in capsys.readouterr().out
+
+
+def _resolved(args: argparse.Namespace, ws: Path) -> argparse.Namespace:
+    """`main()` resolves -w for `run`; tests call the handler directly."""
+    args.workspace = ws
+    return args
+
+
+async def test_bad_workspace_is_a_usage_error(memory_core: Any, tmp_path: Path) -> None:
+    _, settings, _, _ = memory_core
+    args = cli.build_parser().parse_args(["notes", "list", "-w", str(tmp_path / "nope")])
+    with pytest.raises(cli.UsageError):
+        await cli._notes(settings, args)

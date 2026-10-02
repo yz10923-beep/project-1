@@ -30,6 +30,9 @@ from textual.widgets import Collapsible, DataTable, Footer, Input, Label, Static
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
+    NOTES_ADD,
+    NOTES_DELETE,
+    NOTES_LIST,
     PLAN_EDIT,
     RUN_CANCEL,
     RUN_LIST,
@@ -38,6 +41,11 @@ from kama_claude.core.bus.commands import (
     STREAM_END_NOTIFICATION,
     ApprovalRespondParams,
     ApprovalRespondResult,
+    NoteResult,
+    NotesAddParams,
+    NotesDeleteParams,
+    NotesListParams,
+    NotesListResult,
     PlanEditParams,
     PlanEditResult,
     RunCancelParams,
@@ -56,6 +64,7 @@ from kama_claude.core.bus.events import (
     Event,
     LLMDeltaEvent,
     LLMResponseEvent,
+    NoteUpdatedEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
@@ -66,6 +75,7 @@ from kama_claude.core.bus.events import (
     ToolFinishedEvent,
     ToolStartedEvent,
 )
+from kama_claude.core.notes import Note
 from kama_claude.core.plan import (
     PLAN_TOOL_NAMES,
     NewTask,
@@ -73,6 +83,7 @@ from kama_claude.core.plan import (
     TaskChange,
     open_blocker_ids,
 )
+from kama_claude.core.tools.note_tools import NOTE_TOOL_NAMES
 from kama_claude.core.transport.client import CoreUnavailable, JsonRpcClient, RpcError
 from kama_claude.tui.state import RunView
 
@@ -117,6 +128,22 @@ def render_plan(tasks: list[PlanTask]) -> Text:
             out.append("  (you)", style="cyan")
         if t.note:
             out.append(f"\n     {t.note}", style="italic dim")
+        out.append("\n")
+    return out
+
+
+def render_memory(notes: list[Note]) -> Text:
+    """The memory panel: what later runs in this workspace (and session) will be told."""
+    if not notes:
+        return Text("No notes yet.", style="dim")
+    out = Text()
+    for n in notes:
+        out.append(f"[{n.id}] ", style="bold")
+        if n.volatile:
+            out.append("volatile ", style="yellow")
+        out.append(_clip(n.text, 90))
+        if n.by == "user":
+            out.append("  (you)", style="cyan")
         out.append("\n")
     return out
 
@@ -217,7 +244,8 @@ class ChoiceScreen(ModalScreen[str | None]):
             yield Label("A run is in progress. What should this do?", id="question")
             yield Static(Text(self.text))
             yield Label(
-                "t add it as a task to the current run · n start a new run · esc cancel",
+                "t add it as a task to the current run · n run it as a separate conversation"
+                " · esc cancel",
                 classes="hint",
             )
 
@@ -271,6 +299,62 @@ class TraceScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class NotesScreen(ModalScreen[None]):
+    """The agent's notes for this workspace (and session): a to add, d to delete."""
+
+    BINDINGS = [
+        Binding("a", "add", "Add"),
+        Binding("d", "delete", "Delete"),
+        Binding("escape", "close", "Close"),
+    ]
+
+    def __init__(self, app_: KamaTui) -> None:
+        super().__init__()
+        self.kama = app_
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("Memory · a add · d delete · esc close", id="question")
+            table: DataTable[str] = DataTable(cursor_type="row", id="notes")
+            table.add_columns("id", "note", "source", "by")
+            yield table
+
+    async def on_mount(self) -> None:
+        await self.reload()
+        self.query_one("#notes", DataTable).focus()
+
+    async def reload(self) -> None:
+        table = self.query_one("#notes", DataTable)
+        table.clear()
+        for n in await self.kama.load_notes():
+            flag = "[volatile] " if n.volatile else ""
+            table.add_row(n.id, _clip(flag + n.text, 60), _clip(n.source, 20), n.by, key=n.id)
+
+    def action_add(self) -> None:
+        async def done(values: dict[str, str] | None) -> None:
+            if values and values["text"].strip():
+                volatile = values["volatile"].strip().lower() in ("y", "yes")
+                await self.kama.add_note(values["text"], volatile)
+                await self.reload()
+
+        self.app.push_screen(
+            FormScreen("Add a note", [("text", "Fact"), ("volatile", "Changes over time? (y/N)")]),
+            done,
+        )
+
+    async def action_delete(self) -> None:
+        table = self.query_one("#notes", DataTable)
+        if table.row_count == 0:
+            return
+        key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        if key is not None:
+            await self.kama.delete_note(key)
+            await self.reload()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class RunsScreen(ModalScreen[str | None]):
     """Pick a run to watch (runs kama-core has in memory)."""
 
@@ -284,11 +368,12 @@ class RunsScreen(ModalScreen[str | None]):
         with Vertical(id="dialog"):
             yield Label("Runs (Enter to watch)", id="question")
             table: DataTable[str] = DataTable(cursor_type="row", id="runs")
-            table.add_columns("run", "status", "plan", "goal")
+            table.add_columns("run", "status", "plan", "session", "goal")
             # started_at, not run_id: ids have 1s resolution plus a random suffix
             for r in sorted(self.runs, key=lambda r: r.started_at, reverse=True):
                 plan = f"{r.plan_done}/{r.plan_total}" if r.plan_total else ""
-                table.add_row(r.run_id, r.status, plan, _clip(r.goal, 50), key=r.run_id)
+                session = r.session_id[-6:] if r.session_id else ""
+                table.add_row(r.run_id, r.status, plan, session, _clip(r.goal, 44), key=r.run_id)
             yield table
 
     def on_mount(self) -> None:
@@ -312,6 +397,7 @@ class KamaTui(App[None]):
     #log { width: 2fr; padding: 0 1; }
     #side { width: 1fr; min-width: 32; border-left: solid $primary; padding: 0 1; }
     #side-title { text-style: bold; margin-bottom: 1; }
+    #memory-title { text-style: bold; margin: 1 0; }
     #goal { margin: 0 1; }
     .runhead { color: $accent; margin-top: 1; }
     .step { color: $text-muted; margin-top: 1; }
@@ -336,6 +422,8 @@ class KamaTui(App[None]):
         Binding("ctrl+s", "stop_run", "Stop run", priority=True),
         Binding("ctrl+y", "toggle_auto", "Auto-approve", priority=True),
         Binding("ctrl+g", "trace", "Trace", priority=True),
+        Binding("ctrl+n", "new_session", "New chat", priority=True),
+        Binding("ctrl+l", "notes", "Memory", priority=True),
         Binding("ctrl+q", "quit", "Quit", priority=True),
     ]
 
@@ -349,6 +437,7 @@ class KamaTui(App[None]):
         auto_approve: bool = False,
         reconnect_delay_s: float = 0.5,
         trace_report: Callable[[str], str | None] | None = None,
+        session_id: str | None = None,
     ) -> None:
         super().__init__()
         self._client_factory = client_factory
@@ -364,6 +453,9 @@ class KamaTui(App[None]):
         self._tools: dict[str, ToolBlock] = {}
         self._approvals: dict[str, ApprovalScreen] = {}
         self._steps: dict[int, Static] = {}  # step divider, drawn when the step starts
+        # The conversation new goals continue (S4); None: the next goal starts one.
+        self.session_id = session_id
+        self.notes: list[Note] = []
 
     # -------------------------------------------------------------- layout
 
@@ -374,6 +466,8 @@ class KamaTui(App[None]):
             with Vertical(id="side"):
                 yield Label("Plan", id="side-title")
                 yield Static(render_plan([]), id="plan")
+                yield Label("Memory", id="memory-title")
+                yield Static(render_memory([]), id="memory")
         yield Input(
             placeholder=f"Describe a goal and press Enter to run it in {self.workspace}",
             id="goal",
@@ -383,6 +477,7 @@ class KamaTui(App[None]):
     async def on_mount(self) -> None:
         self._refresh_status()
         self.query_one("#goal", Input).focus()
+        self.run_worker(self.refresh_memory(), group="memory")
         if self._initial_goal:
             await self.start_run(self._initial_goal)
         elif self._initial_run:
@@ -412,13 +507,13 @@ class KamaTui(App[None]):
 
     def _refresh_status(self) -> None:
         status = self.query_one("#status", Static)
+        chat = f"session {self.session_id}" if self.session_id else "new conversation"
         if self.view is None:
             auto = "auto-approve ON" if self.auto_approve else "asks before bash/write"
-            status.update(Text(f"no run · {auto} · {self.connection}"))
+            status.update(Text(f"no run · {chat} · {auto} · {self.connection}"))
         else:
-            status.update(
-                Text(self.view.headline(auto_approve=self.auto_approve, connection=self.connection))
-            )
+            head = self.view.headline(auto_approve=self.auto_approve, connection=self.connection)
+            status.update(Text(f"{head} · {chat}"))
 
     # -------------------------------------------------------------- rpc
 
@@ -433,29 +528,38 @@ class KamaTui(App[None]):
         async with self._client_factory() as client:
             return await client.call(method, params, result)
 
-    async def start_run(self, goal: str) -> None:
+    async def start_run(self, goal: str, *, separate: bool = False) -> None:
+        """Run `goal` in the current conversation (or a new one: `separate`, or none yet)."""
         try:
             started = await self.rpc(
                 RUN_START,
                 RunStartParams(
-                    goal=goal, workspace=str(self.workspace), auto_approve=self.auto_approve
+                    goal=goal,
+                    workspace=str(self.workspace),
+                    auto_approve=self.auto_approve,
+                    session_id=None if separate else self.session_id,
+                    new_session=separate or self.session_id is None,
                 ),
                 RunStartResult,
             )
         except (CoreUnavailable, RpcError) as e:
             self._fail("start the run", e)
             return
-        self.watch_run(started.run_id)
+        same_chat = not separate and started.session_id == self.session_id
+        self.session_id = started.session_id
+        self.watch_run(started.run_id, keep_log=same_chat)
 
     # -------------------------------------------------------------- watching a run
 
-    def watch_run(self, run_id: str) -> None:
-        """Show `run_id` from its first event, replacing whatever was shown."""
+    def watch_run(self, run_id: str, *, keep_log: bool = False) -> None:
+        """Show `run_id` from its first event. A run continuing the conversation on
+        screen is appended below it; anything else replaces the log."""
         self.workers.cancel_group(self, "watch")
         for screen in list(self._approvals.values()):
             self._close(screen)
         self._approvals.clear()
-        self.query_one("#log", VerticalScroll).remove_children()
+        if not keep_log:
+            self.query_one("#log", VerticalScroll).remove_children()
         self._text, self._tools, self._steps = None, {}, {}
         self.view = RunView(run_id)
         self.query_one("#plan", Static).update(render_plan([]))
@@ -530,6 +634,18 @@ class KamaTui(App[None]):
         match event:
             case RunStartedEvent():
                 self._note(f"▶ {event.run_id}  {event.goal}", "runhead")
+                if event.session_id and event.session_id != self.session_id:
+                    self.session_id = event.session_id  # watching another conversation
+                    self.run_worker(self.refresh_memory(), group="memory")
+                if event.history_messages:
+                    fixed = f", repaired {event.repaired}" if event.repaired else ""
+                    self._note(
+                        f"↳ continues the conversation ({event.history_messages} messages{fixed})",
+                        "user",
+                    )
+                if event.preamble:
+                    n = event.preamble.count("\n- [")
+                    self._note(f"↳ memory sent before the goal: {n} note(s)", "user")
             case LLMResponseEvent():
                 u = event.usage
                 self._step_divider(event.step).update(
@@ -544,7 +660,7 @@ class KamaTui(App[None]):
                     block = TextBlock()
                     self._append(block)
                     block.append(text)
-            case ToolStartedEvent() if event.name not in PLAN_TOOL_NAMES:
+            case ToolStartedEvent() if event.name not in PLAN_TOOL_NAMES | NOTE_TOOL_NAMES:
                 self._tools[event.tool_use_id] = tool_block = ToolBlock(event)
                 self._append(tool_block)
             case ToolFinishedEvent():
@@ -568,6 +684,13 @@ class KamaTui(App[None]):
                 self.query_one("#plan", Static).update(render_plan(event.tasks))
                 if event.by == "user":
                     self._note(f"✎ plan changed: {event.summary}", "user")
+            case NoteUpdatedEvent():
+                why = f" ({event.reason})" if event.reason else ""
+                self._note(
+                    f"✎ note {event.note.id} {event.action}: {_clip(event.note.text, 90)}{why}",
+                    "user",
+                )
+                self._apply_note(event)
             case PlanNoticeEvent():
                 self._note("(the model has been told about the plan change)", "user")
             case PlanReminderEvent():
@@ -636,7 +759,7 @@ class KamaTui(App[None]):
 
         async def chosen(choice: str | None) -> None:
             if choice == "new":
-                await self.start_run(text)
+                await self.start_run(text, separate=True)
             elif choice == "task":
                 await self._edit_plan(PlanEditParams(run_id=view.run_id, add=[NewTask(title=text)]))
             else:
@@ -724,6 +847,63 @@ class KamaTui(App[None]):
             if self.auto_approve
             else "new runs ask before bash and write_file"
         )
+        self._refresh_status()
+
+    # -------------------------------------------------------------- memory
+
+    def _apply_note(self, event: NoteUpdatedEvent) -> None:
+        notes = [n for n in self.notes if n.id != event.note.id]
+        if event.action != "deleted":
+            notes.append(event.note)
+        self.notes = sorted(notes, key=lambda n: (n.scope != "workspace", n.created_at))
+        self.query_one("#memory", Static).update(render_memory(self.notes))
+
+    async def load_notes(self) -> list[Note]:
+        try:
+            got = await self.rpc(
+                NOTES_LIST,
+                NotesListParams(workspace=str(self.workspace), session_id=self.session_id),
+                NotesListResult,
+            )
+        except (CoreUnavailable, RpcError):
+            return self.notes  # memory off or daemon away: keep what is shown
+        self.notes = got.notes
+        return self.notes
+
+    async def refresh_memory(self) -> None:
+        notes = await self.load_notes()
+        self.query_one("#memory", Static).update(render_memory(notes))
+
+    async def add_note(self, text: str, volatile: bool) -> None:
+        try:
+            await self.rpc(
+                NOTES_ADD,
+                NotesAddParams(workspace=str(self.workspace), text=text, volatile=volatile),
+                NoteResult,
+            )
+        except (CoreUnavailable, RpcError) as e:
+            self._fail("save the note", e)
+        await self.refresh_memory()
+
+    async def delete_note(self, note_id: str) -> None:
+        try:
+            await self.rpc(
+                NOTES_DELETE,
+                NotesDeleteParams(
+                    workspace=str(self.workspace), note_id=note_id, session_id=self.session_id
+                ),
+                NoteResult,
+            )
+        except (CoreUnavailable, RpcError) as e:
+            self._fail("delete the note", e)
+        await self.refresh_memory()
+
+    def action_notes(self) -> None:
+        self.push_screen(NotesScreen(self))
+
+    def action_new_session(self) -> None:
+        self.session_id = None
+        self.notify("the next goal starts a new conversation (workspace notes carry over)")
         self._refresh_status()
 
     def action_trace(self) -> None:

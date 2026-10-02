@@ -439,3 +439,67 @@ async def test_unreachable_daemon_says_how_to_start_it(tmp_path: Path) -> None:
     async with app.run_test(size=(140, 40)) as pilot:
         await until(pilot, lambda: bool(seen))
     assert "could not start the run" in seen[0] and "uv run kama-core" in seen[0]
+
+
+# ---------------------------------------------------------------- S4: conversations, memory
+
+
+async def test_goals_continue_one_conversation_until_ctrl_n(rig_factory: Any) -> None:
+    replies = iter(["first answer", "second answer", "fresh answer"])
+    rig = await rig_factory(lambda: ScriptedProvider([text_response(next(replies))]))
+    app = rig.tui(auto_approve=True)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.click("#goal")
+        await pilot.press(*"one", "enter")
+        await until(pilot, lambda: app.view is not None and app.view.finished)
+        sid = app.session_id
+        assert sid is not None and f"session {sid}" in panel(app, "#status")
+        await pilot.press(*"two", "enter")
+        await until(pilot, lambda: "second answer" in log_text(app) and app.view.finished)  # type: ignore[union-attr]
+        text = log_text(app)
+        assert "first answer" in text  # the earlier run stays on screen
+        assert "↳ continues the conversation (2 messages)" in text
+        assert app.session_id == sid
+        assert [m["role"] for m in rig.providers[1].requests[0].messages] == [
+            "user",
+            "assistant",
+            "user",
+        ]
+
+        await pilot.press("ctrl+n")
+        await pilot.press(*"three", "enter")
+        await until(pilot, lambda: "fresh answer" in log_text(app) and app.view.finished)  # type: ignore[union-attr]
+        assert app.session_id not in (None, sid)
+        assert "first answer" not in log_text(app)  # a new conversation, a clean log
+        assert len(rig.providers[2].requests[0].messages) == 1
+
+
+async def test_memory_panel_follows_the_agents_notes(rig_factory: Any) -> None:
+    from kama_claude.tui.app import NotesScreen
+
+    rig = await rig_factory(
+        lambda: ScriptedProvider(
+            [
+                tool_response(("n", "note_save", {"text": "tests need RISK_DB", "volatile": True})),
+                text_response("saved"),
+            ]
+        )
+    )
+    app = rig.tui(goal="learn", auto_approve=True)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await until(pilot, lambda: app.view is not None and app.view.finished)
+        await until(pilot, lambda: "[w1] volatile tests need RISK_DB" in panel(app, "#memory"))
+        assert "✎ note w1 added: tests need RISK_DB" in log_text(app)
+        assert "note_save" not in " ".join(t.title for t in app.query(ToolBlock))
+
+        await pilot.press("ctrl+l")
+        await until(pilot, lambda: isinstance(app.screen, NotesScreen))
+        await pilot.press("a")
+        await until(pilot, lambda: isinstance(app.screen, FormScreen))
+        await pilot.press(*"reports due 17:00", "enter", "enter")
+        await until(pilot, lambda: "reports due 17:00" in panel(app, "#memory"))
+        assert "(you)" in panel(app, "#memory")
+        await until(pilot, lambda: isinstance(app.screen, NotesScreen))
+        await pilot.press("d")  # cursor on the first row: w1
+        await until(pilot, lambda: "RISK_DB" not in panel(app, "#memory"))
+        await pilot.press("escape")
