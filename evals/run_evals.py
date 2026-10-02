@@ -17,6 +17,7 @@ from evals.harness import (
     RESULTS_DIR,
     RunConfig,
     SuiteAborted,
+    compare,
     harness_sha,
     load_tasks,
     run_suite,
@@ -62,6 +63,9 @@ def main() -> None:
     run.add_argument("--approve-harness", action="store_true")
     summ = sub.add_parser("summary")
     summ.add_argument("--variant", default="baseline")
+    cmp = sub.add_parser("compare", help="two variants side by side, per task and sub-check")
+    cmp.add_argument("a")
+    cmp.add_argument("b")
     args = ap.parse_args()
 
     if args.cmd == "list":
@@ -77,6 +81,9 @@ def main() -> None:
         raise SystemExit(1 if problems else 0)
     if args.cmd == "summary":
         print(summarize(RESULTS_DIR / args.variant))
+        return
+    if args.cmd == "compare":
+        print(compare(RESULTS_DIR / args.a, RESULTS_DIR / args.b))
         return
 
     tasks = load_tasks(args.tasks.split(",") if args.tasks else None)

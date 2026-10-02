@@ -21,6 +21,7 @@ import importlib.util
 import json
 import math
 import random
+import re
 import shutil
 import statistics
 import subprocess
@@ -770,14 +771,39 @@ def _planning_line(rows: list[dict[str, Any]]) -> str:
     )
 
 
+def _load_rows(variant_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def read(path: Path) -> list[dict[str, Any]]:
+        return [json.loads(x) for x in path.read_text().splitlines() if x] if path.exists() else []
+
+    return read(variant_dir / "results.jsonl"), read(variant_dir / "errors.jsonl")
+
+
+_PART = re.compile(r"(?:^|, )(\w+) (ok|WRONG)\b")
+
+
+def check_parts(reason: str) -> dict[str, bool]:
+    """The named sub-checks in a grader's reason ("answer ok, run2_no_reread WRONG · ..."),
+    in order. A pass/fail score hides which part failed; across reps the parts show it."""
+    head = reason.split(" · ")[0]
+    return {m.group(1): m.group(2) == "ok" for m in _PART.finditer(head)}
+
+
+def part_rates(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
+    """Per sub-check: (passed, graded) over the given trials of one task."""
+    rates: dict[str, tuple[int, int]] = {}
+    for r in rows:
+        for name, ok in check_parts(r["explanation"]["passed"]).items():
+            k, n = rates.get(name, (0, 0))
+            rates[name] = (k + ok, n + 1)
+    return rates
+
+
+def _render_parts(rates: dict[str, tuple[int, int]]) -> str:
+    return " · ".join(f"{name} {k}/{n}" for name, (k, n) in rates.items())
+
+
 def summarize(variant_dir: Path) -> str:
-    res_path, err_path = variant_dir / "results.jsonl", variant_dir / "errors.jsonl"
-    rows = (
-        [json.loads(x) for x in res_path.read_text().splitlines() if x] if res_path.exists() else []
-    )
-    errs = (
-        [json.loads(x) for x in err_path.read_text().splitlines() if x] if err_path.exists() else []
-    )
+    rows, errs = _load_rows(variant_dir)
     ok = [r for r in rows if r["status"] == "ok"]
     if not ok:
         return f"no scored trials in {variant_dir}"
@@ -843,4 +869,72 @@ def summarize(variant_dir: Path) -> str:
         steps = ",".join(str(r["steps"]) for r in rs)
         reason = rs[-1]["explanation"]["passed"].replace("|", "/")[:80]
         lines.append(f"| {tid} | {' '.join(rs[0]['tags'])} | {passed} | {steps} | {reason} |")
+    parted = {tid: part_rates(rs) for tid, rs in sorted(by_task.items())}
+    if any(len(p) > 1 for p in parted.values()):
+        lines += ["", "Sub-checks (passed/graded over all reps):"]
+        lines += [f"- {tid}: {_render_parts(p)}" for tid, p in parted.items() if len(p) > 1]
+    return "\n".join(lines)
+
+
+def _arm(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    costs = [c for r in rows if (c := cost_usd(r["model"], r["usage"])) is not None]
+    return {
+        "passed": sum(int(r["grade"]["passed"]) for r in rows),
+        "n": len(rows),
+        "steps": statistics.median(r["steps"] for r in rows),
+        "tools": statistics.median(r["tool_calls"] for r in rows),
+        "cost": statistics.median(costs) if costs else None,
+        "parts": part_rates(rows),
+    }
+
+
+def compare(a_dir: Path, b_dir: Path) -> str:
+    """Two variants side by side, per task: pass counts, each sub-check, median steps,
+    tool calls and cost. Only tasks both variants ran are compared."""
+    by: list[dict[str, list[dict[str, Any]]]] = []
+    for d in (a_dir, b_dir):
+        rows, _ = _load_rows(d)
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for r in rows:
+            if r["status"] == "ok":
+                grouped[r["prompt_id"]].append(r)
+        by.append(grouped)
+    shared = sorted(set(by[0]) & set(by[1]))
+    if not shared:
+        return f"no task was scored in both {a_dir.name} and {b_dir.name}"
+    a, b = a_dir.name, b_dir.name
+
+    def money(x: float | None) -> str:
+        return "?" if x is None else f"${x:.3f}"
+
+    lines = [
+        f"## {a} vs {b} ({len(shared)} shared tasks)",
+        "",
+        f"| task | check | {a} | {b} |",
+        "|---|---|---|---|",
+    ]
+    totals = [[0, 0], [0, 0]]
+    for tid in shared:
+        x, y = _arm(by[0][tid]), _arm(by[1][tid])
+        for t, arm in zip(totals, (x, y), strict=True):
+            t[0] += arm["passed"]
+            t[1] += arm["n"]
+        lines.append(f"| {tid} | **passed** | {x['passed']}/{x['n']} | {y['passed']}/{y['n']} |")
+        for name in [*x["parts"], *(p for p in y["parts"] if p not in x["parts"])]:
+            cells = [
+                "/".join(map(str, arm["parts"][name])) if name in arm["parts"] else "-"
+                for arm in (x, y)
+            ]
+            lines.append(f"| | {name} | {cells[0]} | {cells[1]} |")
+        lines.append(
+            f"| | median steps · tools | {x['steps']} · {x['tools']} | "
+            f"{y['steps']} · {y['tools']} |"
+        )
+        lines.append(f"| | median cost | {money(x['cost'])} | {money(y['cost'])} |")
+    (ka, na), (kb, nb) = totals
+    lines += [
+        "",
+        f"Total: {a} {ka}/{na}, {b} {kb}/{nb}. Noise floor ≈ ±{1 / math.sqrt(min(na, nb)):.0%}"
+        " of trials: a smaller gap is not evidence of a difference.",
+    ]
     return "\n".join(lines)

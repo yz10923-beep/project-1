@@ -97,6 +97,7 @@ uv run python -m evals.run_evals list      # eval tasks (docs/EVALS.md explains 
 make evals-selftest                        # graders vs oracle / null / wrong solutions; free
 uv run python -m evals.run_evals run --reps 3 [--variant v1] [--tasks a,b]   # paid
 uv run python -m evals.run_evals summary [--variant v1]
+uv run python -m evals.run_evals compare v1 v2   # A/B per task and sub-check
 ```
 
 Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the API key in

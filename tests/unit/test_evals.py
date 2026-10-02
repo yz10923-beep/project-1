@@ -8,7 +8,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from evals.harness import RunConfig, SuiteAborted, load_tasks, run_suite, selftest, summarize
+from evals.harness import (
+    RunConfig,
+    SuiteAborted,
+    check_parts,
+    compare,
+    load_tasks,
+    run_suite,
+    selftest,
+    summarize,
+)
 
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.types import LLMError, LLMResponse
@@ -383,3 +392,60 @@ async def test_without_memory_the_notes_task_cannot_pass(tmp_path: Path) -> None
     [row] = rows(cfg)
     assert row["grade"]["passed"] == 0.0
     assert "run2_no_docs WRONG" in row["explanation"]["passed"]
+
+
+# ---------------------------------------------------------------- sub-checks and A/B
+
+
+def write_rows(variant_dir: Path, trials: list[tuple[str, bool, str]]) -> None:
+    variant_dir.mkdir(parents=True)
+    usage = {"input_tokens": 1000, "output_tokens": 100}
+    with (variant_dir / "results.jsonl").open("w") as fh:
+        for rep, (task, passed, reason) in enumerate(trials):
+            row = {
+                "prompt_id": task,
+                "rep": rep,
+                "tags": ["t"],
+                "status": "ok",
+                "run_status": "completed",
+                "grade": {"passed": float(passed), "refused": 0.0},
+                "explanation": {"passed": reason},
+                "model": "claude-opus-5",
+                "usage": usage,
+                "steps": 4 + rep,
+                "tool_calls": 3,
+                "tool_errors": 0,
+                "wall_s": 10.0,
+                "meta": {},
+            }
+            fh.write(json.dumps(row) + "\n")
+
+
+def test_check_parts_reads_the_named_checks_and_ignores_free_text() -> None:
+    reason = "answer ok, run2_no_reread WRONG · incident.json {'venue': 'X ok'} != ARCX/R07"
+    assert check_parts(reason) == {"answer": True, "run2_no_reread": False}
+    assert check_parts("8/10 · failed R8 R9") == {}  # not this format: nothing invented
+
+
+def test_summary_and_compare_show_which_part_failed(tmp_path: Path) -> None:
+    # The A/B where pass rate says "no difference" and the parts say where the difference is
+    write_rows(
+        tmp_path / "mem",
+        [("recall", False, "answer ok, no_reread WRONG")] * 3 + [("other", True, "done")],
+    )
+    write_rows(
+        tmp_path / "nomem",
+        [("recall", False, "answer WRONG, no_reread WRONG")] * 3
+        + [("only-here", True, "x ok, y ok")],
+    )
+    assert "- recall: answer 3/3 · no_reread 0/3" in summarize(tmp_path / "mem")
+    assert "- only-here: x 1/1 · y 1/1" in summarize(tmp_path / "nomem")
+    assert "- other:" not in summarize(tmp_path / "mem")  # no named parts, no line
+    text = compare(tmp_path / "mem", tmp_path / "nomem")
+    assert "## mem vs nomem (1 shared tasks)" in text  # tasks only one arm ran are left out
+    assert "| recall | **passed** | 0/3 | 0/3 |" in text
+    assert "| | answer | 3/3 | 0/3 |" in text
+    assert "| | no_reread | 0/3 | 0/3 |" in text
+    assert "| | median steps · tools | 5 · 3 | 5 · 3 |" in text
+    assert "Total: mem 0/3, nomem 0/3" in text
+    assert "no task was scored in both" in compare(tmp_path / "mem", tmp_path / "missing")
