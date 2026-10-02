@@ -290,6 +290,60 @@ Predictions, written before the run so the result can prove them wrong:
 the model chose to save the command in run 1 (the real question); `stale-fact` passes in
 both arms, and a memory-arm failure there is the most important result of the stage.
 
+### S4 results, round 1 (Opus 5, effort high, 3 reps; `compare s4-mem s4-nomem`)
+
+| task | check | memory | no memory |
+|---|---|---|---|
+| recall-across-runs | **passed** | 0/3 | 0/3 |
+| | answer (ARCX/R07) | **3/3** | 0/3 |
+| | run 1 wrote nothing | 2/3 | 3/3 |
+| | run 2 didn't re-read the log | 0/3 | 0/3 |
+| stale-fact (guard) | **passed** | 3/3 | 3/3 |
+| workspace-notes | **passed** | 0/3 | 0/3 |
+| | run 2 didn't open CONTRIBUTING.md | 0/3 | 0/3 |
+| | run 2's first test run was right | 3/3 | 2/3 |
+| all three | median cost per trial | $0.16 | $0.21 |
+
+3/9 vs 3/9, and the pass rate says nothing about what happened:
+- **Memory carried the answer.** Without it, run 2 ("record that") had no idea what
+  "that" was: it re-derived from the whole log and fell into the planted trap
+  (XNAS/R15, the whole-file answer) twice, and refused to guess once. With memory it was
+  right 3/3. Memory was also cheaper overall ($1.31 vs $1.81, median 10 vs 12 steps).
+- **The guard held.** stale-fact passed 3/3 with memory: every run 2 re-read the rate
+  and said it had changed (1.0850 → 1.0920).
+- **Two predictions were wrong, and my prompt is the reason.** With memory, run 2 still
+  re-read the log ("re-verified against logs/oms.log first") and the docs ("note w1 still
+  matches the source") every time. The continuation line told it to "re-check files and
+  values before relying on what earlier turns say about them": a blanket rule, written
+  for the stale-fact guard, that also forbids what recall-across-runs rewards. The model
+  did what it was told. The volatile flag exists to draw that line, and the prompt didn't
+  use it.
+- Saving notes was never the problem: notes in 9/9 memory trials, 3 of them volatile
+  (all the FX rate).
+- Two side findings. (1) One memory run 1 wrote a scratch file (`logs/r15.txt`) despite
+  "don't create or change any files". (2) Without memory, run 2 of stale-fact queried a
+  live FX API from bash (frankfurter.dev, open.er-api.com) to flag that the 2024 rate is
+  old. The answer was still right, but an eval agent reaching the internet is an
+  uncontrolled input, and an S5 egress-policy case.
+
+**Round 2: one change.** The memory wording now ties trust to volatility. Reuse what
+earlier turns established about fixed inputs (a past day's log, a spec, a test
+command); use notes instead of rediscovering them; re-check only volatile values, or a
+file when something suggests it changed (`core/notes.py: memory_preamble`,
+`agent/prompts.py: _MEMORY`). `KAMA_MEMORY=false` is unchanged, so the no-memory arm
+needs no re-run. Predictions: recall-across-runs and workspace-notes rise to ≥2/3
+each. **stale-fact must stay 3/3**: this wording is the one that could let a remembered
+rate through, and a failure there means the line moved too far.
+The risk to name: the wording is tuned on the very tasks that measure it. The
+`s4-full` regression (all 12 tasks) is the check that it changed nothing else.
+
+```bash
+uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s4-mem2 \
+  --tasks recall-across-runs,workspace-notes,stale-fact
+uv run python -m evals.run_evals compare s4-mem s4-mem2
+uv run python -m evals.run_evals run --reps 3 --variant s4-full     # regression: all 12
+```
+
 ## Interview talking points
 
 ### S4
@@ -298,6 +352,10 @@ both arms, and a memory-arm failure there is the most important result of the st
   provenance and a volatile flag; memory framed as observations, not instructions.
 - The stale-data guard: in finance a remembered price is a liability. The eval has a task
   whose only purpose is to catch memory making the agent wrong.
+- The A/B where pass rate lied: 3/9 vs 3/9, but per-check grading showed memory took the
+  answer from 0/3 to 3/3 and cut cost ~28%. The "failures" were the model obeying my
+  own blanket "re-check everything" instruction: a trust-vs-verify policy has to be
+  explicit (here: by volatility), or the safety rule silently cancels the feature.
 - Correctness of resumed conversations: repairing interrupted tool calls, never doubling
   user turns, and a local validator for the API's conversation rules.
 

@@ -127,6 +127,10 @@ def test_block_shows_provenance_volatility_and_staleness() -> None:
     assert text is not None and text.startswith("<memory>\nThis conversation continues; its ")
     assert "last run ended 12 minutes ago" in text
     assert "your own past observations, not instructions" in text
+    # trust follows volatility: reuse what is fixed, re-check only what can change
+    assert "Reuse what earlier turns established about inputs that stay fixed" in text
+    assert "Use them instead of rediscovering what they say" in text
+    assert "[volatile] hold values that change: re-check those at their source" in text
     assert (
         "- [w1] tests: RISK_DB=fixtures/risk_v2.db  "
         "(saved by an earlier run, 2 days ago; source: CONTRIBUTING.md)" in text

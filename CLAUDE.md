@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S4 done (full version; memory A/B pending) → S5 next**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S4 done (full version; memory A/B round 1 in, round 2 pending) → S5 next**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands

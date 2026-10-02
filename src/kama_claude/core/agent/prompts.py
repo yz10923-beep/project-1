@@ -32,8 +32,9 @@ You have durable notes (note_save, note_update, note_delete, note_list) that lat
 in this workspace see. Save a fact when a later run would otherwise have to rediscover \
 it: how to build or test the project, where things live, decisions the user made. Do not \
 save secrets or what the files already say plainly. Say where each fact came from. Mark \
-values that change (prices, rates, refreshed files) volatile, and re-check volatile notes \
-at their source before using them. Update or delete notes that turn out wrong.
+values that change (prices, rates, refreshed files) volatile. Use other notes as they are \
+instead of re-deriving them; re-check volatile ones at their source before using them. \
+Update or delete notes that turn out wrong.
 """
 
 
