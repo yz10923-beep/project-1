@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
+from kama_claude.core.notes import NoteBook
 from kama_claude.core.plan import Plan
 
 
@@ -15,6 +16,8 @@ class ToolContext:
     workspace: Path
     # One plan per run; only the task_* tools touch it.
     plan: Plan = field(default_factory=Plan)
+    # The run's view of durable notes (S4); None when memory is off.
+    notes: NoteBook | None = None
 
 
 @dataclass(frozen=True)

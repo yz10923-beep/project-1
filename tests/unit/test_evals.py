@@ -268,9 +268,12 @@ async def test_multi_run_task_runs_in_one_session_and_grades_the_trajectory(
     # run 2 was sent run 1's conversation: that is what made the re-read unnecessary
     run2_first = providers[0].requests[2].messages
     assert run2_first[0]["content"].startswith("Our order management system log")
-    assert run2_first[-1]["content"].startswith("Good. Record that")
+    preamble, goal = run2_first[-1]["content"]  # a continued session opens with memory
+    assert preamble["text"].startswith("<memory>\nThis conversation continues")
+    assert goal["text"].startswith("Good. Record that")
     trace = json.loads((cfg.variant_dir / "traces" / "recall-across-runs_rep0.json").read_text())
-    assert [t["content"][:4] for t in trace if t["role"] == "user"] == ["Our ", "Good"]
+    users = [t["content"] for t in trace if t["role"] == "user"]
+    assert users[0].startswith("Our ") and "Good. Record that" in users[1]
 
 
 async def test_memory_off_runs_each_goal_fresh(tmp_path: Path) -> None:
@@ -317,3 +320,53 @@ def test_recall_log_is_frozen(tmp_path: Path) -> None:
     load_task_module(TASKS_DIR / "recall-across-runs", "setup").setup(tmp_path)
     digest = hashlib.sha256((tmp_path / "logs" / "oms.log").read_bytes()).hexdigest()
     assert digest == OMS_LOG_SHA
+
+
+async def test_workspace_note_carries_across_sessions_in_a_trial(tmp_path: Path) -> None:
+    cmd = "RISK_DB=fixtures/risk_v2.db python -m pytest -q"
+    script: list[LLMResponse | LLMError] = [
+        # run 1: discover the command, then remember it
+        tool_response(("r", "read_file", {"path": "CONTRIBUTING.md"})),
+        tool_response(
+            ("t", "bash", {"command": cmd}),
+            ("n", "note_save", {"text": f"Run tests with: {cmd}", "source": "CONTRIBUTING.md"}),
+        ),
+        text_response(f"Use `{cmd}`; 9 pass."),
+        # run 2 (new session): straight to the right command, from the note
+        tool_response(("t2", "bash", {"command": f"{cmd} | tail -1"})),
+        tool_response(("w", "write_file", {"path": "checks.txt", "content": "9\n"})),
+        text_response("9"),
+    ]
+    providers: list[ScriptedProvider] = []
+
+    def factory(s: Settings) -> ScriptedProvider:
+        providers.append(ScriptedProvider(list(script)))
+        return providers[-1]
+
+    cfg = cfg_for(tmp_path, factory)
+    await run_suite(load_tasks(["workspace-notes"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 1.0, row["explanation"]
+    assert [r["new_session"] for r in row["runs"]] == [False, True]
+    run2_opening = providers[0].requests[3].messages
+    assert len(run2_opening) == 1  # new session: no history...
+    assert f"Run tests with: {cmd}" in run2_opening[0]["content"][0]["text"]  # ...but the note
+
+
+async def test_without_memory_the_notes_task_cannot_pass(tmp_path: Path) -> None:
+    # Same model behaviour, memory off: run 2 has nothing to go on and must rediscover.
+    script: list[LLMResponse | LLMError] = [
+        text_response("I looked: use RISK_DB=fixtures/risk_v2.db."),
+        tool_response(("r", "read_file", {"path": "CONTRIBUTING.md"})),
+        tool_response(
+            ("t", "bash", {"command": "RISK_DB=fixtures/risk_v2.db python -m pytest -q"})
+        ),
+        tool_response(("w", "write_file", {"path": "checks.txt", "content": "9\n"})),
+        text_response("9"),
+    ]
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(list(script)))
+    cfg.settings = cfg.settings.model_copy(update={"memory": False})
+    await run_suite(load_tasks(["workspace-notes"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 0.0
+    assert "run2_no_docs WRONG" in row["explanation"]["passed"]

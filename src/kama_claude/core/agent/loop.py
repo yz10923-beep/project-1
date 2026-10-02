@@ -34,6 +34,7 @@ from kama_claude.core.agent.sinks import EventSink
 from kama_claude.core.bus.events import (
     LLMDeltaEvent,
     LLMResponseEvent,
+    NoteUpdatedEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
@@ -47,6 +48,7 @@ from kama_claude.core.bus.events import (
 )
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import LLMError, LLMProvider, Message, ToolCall, Usage
+from kama_claude.core.notes import NoteBook, NoteStore
 from kama_claude.core.plan import (
     PLAN_TOOL_NAMES,
     NewTask,
@@ -59,6 +61,7 @@ from kama_claude.core.plan import (
     render_tasks,
 )
 from kama_claude.core.tools.base import ToolContext, ToolResult
+from kama_claude.core.tools.note_tools import NOTE_TOOL_NAMES
 from kama_claude.core.tools.registry import ToolRegistry
 from kama_claude.core.trace.tracer import Tracer
 
@@ -167,6 +170,7 @@ class AgentLoop:
         approver: Approver,
         max_steps: int = 30,
         tracer: Tracer | None = None,
+        notes: NoteStore | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -178,6 +182,10 @@ class AgentLoop:
         self._seq = 0
         # The system prompt only mentions planning when the tools are really there.
         self._planning = all(registry.get(n) is not None for n in PLAN_TOOL_NAMES)
+        self._notes = notes
+        self._memory = notes is not None and all(
+            registry.get(n) is not None for n in NOTE_TOOL_NAMES
+        )
         self._state = _RunState()
         self._run_id: str | None = None  # set while a run is in progress
         self._run_span_id: str | None = None
@@ -260,7 +268,12 @@ class AgentLoop:
     ) -> RunResult:
         t0 = time.monotonic()
         self._seq = 0
-        self._ctx = ToolContext(workspace=self._ctx.workspace, plan=Plan())
+        book = (
+            NoteBook(self._notes, self._ctx.workspace, session_id, run_id)
+            if self._memory and self._notes is not None
+            else None
+        )
+        self._ctx = ToolContext(workspace=self._ctx.workspace, plan=Plan(), notes=book)
         state = self._state = _RunState()
         self._pending_notices = []
         self._run_id = run_id
@@ -302,7 +315,7 @@ class AgentLoop:
             )
             return RunResult(run_id, status, text, state.steps, state.usage, error, retryable)
 
-        system = system_prompt(self._ctx.workspace, planning=self._planning)
+        system = system_prompt(self._ctx.workspace, planning=self._planning, memory=self._memory)
         tools = self._registry.specs()
 
         try:
@@ -493,6 +506,18 @@ class AgentLoop:
                     **self._meta(run_id), step=step, tool_use_id=call.id, tasks=self._ctx.plan.tasks
                 )
             )
+        if call.name in NOTE_TOOL_NAMES and self._ctx.notes is not None:
+            for change in self._ctx.notes.drain():
+                await self._sink.emit(
+                    NoteUpdatedEvent(
+                        **self._meta(run_id),
+                        step=step,
+                        tool_use_id=call.id,
+                        action=change.action,
+                        note=change.note,
+                        reason=change.reason,
+                    )
+                )
         await self._sink.emit(
             ToolFinishedEvent(
                 **self._meta(run_id),

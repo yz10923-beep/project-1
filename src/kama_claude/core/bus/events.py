@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, TypeAdapter
 
 from kama_claude.core.llm.types import StopReason, Usage
+from kama_claude.core.notes import Note, NoteAction
 from kama_claude.core.plan import ChangedBy, PlanTask
 
 
@@ -120,6 +121,17 @@ class PlanUpdatedEvent(_RunEvent):
     summary: str = Field(default="", description="What changed, for user edits.")
 
 
+class NoteUpdatedEvent(_RunEvent):
+    """A durable note was added, changed or deleted during this run (S4 memory)."""
+
+    type: Literal["note.updated"] = "note.updated"
+    step: int
+    tool_use_id: str | None = Field(description="The note_* call; None for a user edit.")
+    action: NoteAction
+    note: Note
+    reason: str = ""
+
+
 class PlanNoticeEvent(_RunEvent):
     """User plan edits, delivered to the model: `text` was appended to the user message
     sent at `step`. Durable for the same reason as plan.reminder: it is conversation."""
@@ -172,6 +184,7 @@ Event = Annotated[
     | PlanUpdatedEvent
     | PlanReminderEvent
     | PlanNoticeEvent
+    | NoteUpdatedEvent
     | RunFinishedEvent
     | LLMDeltaEvent,
     Field(discriminator="type"),

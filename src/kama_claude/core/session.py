@@ -31,6 +31,7 @@ class SessionRun(BaseModel):
     goal: str
     started_at: datetime
     status: str = "running"  # then the run's RunStatus
+    finished_at: datetime | None = None
 
 
 class SessionInfo(BaseModel):
@@ -113,10 +114,11 @@ class SessionStore:
 
     def finish_run(self, session_id: str, run_id: str, status: str) -> None:
         info = self.get(session_id)
+        now = datetime.now(UTC)
         for r in info.runs:
             if r.run_id == run_id:
-                r.status = status
-        info.updated_at = datetime.now(UTC)
+                r.status, r.finished_at = status, now
+        info.updated_at = now
         self._write(info)
 
     def history(self, session_id: str, *, before_run: str | None = None) -> list[Message]:

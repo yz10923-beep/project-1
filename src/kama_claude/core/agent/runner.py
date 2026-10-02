@@ -4,6 +4,7 @@ harness (run_goal), and by the daemon's RunManager (build_loop)."""
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,9 +14,11 @@ from kama_claude.core.agent.loop import AgentLoop, Approver, RunResult
 from kama_claude.core.agent.sinks import EventSink, FanoutSink, JsonlEventWriter
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.anthropic_provider import AnthropicProvider
-from kama_claude.core.llm.types import LLMProvider
+from kama_claude.core.llm.types import LLMProvider, Message
+from kama_claude.core.notes import NoteStore, memory_preamble
 from kama_claude.core.session import SessionStore
 from kama_claude.core.tools.builtin import builtin_tools
+from kama_claude.core.tools.note_tools import note_tools
 from kama_claude.core.tools.plan_tools import plan_tools
 from kama_claude.core.tools.registry import ToolRegistry
 from kama_claude.core.trace.tracer import JsonlSpanWriter, Tracer
@@ -53,6 +56,38 @@ def run_tracer(run_id: str, run_dir: Path) -> Tracer:
     return Tracer(run_id, JsonlSpanWriter(run_dir / TRACE_FILE))
 
 
+@dataclass(frozen=True)
+class RunContext:
+    """What a run starts from besides its goal (S4): the session's conversation so far and
+    the memory block (notes, and a staleness reminder when the session continues)."""
+
+    history: list[Message]
+    preamble: str | None
+
+
+def prepare_run(
+    settings: Settings,
+    workspace: Path,
+    session_id: str | None,
+    sessions: SessionStore,
+    notes: NoteStore | None,
+) -> RunContext:
+    if not settings.memory:
+        return RunContext([], None)
+    history: list[Message] = []
+    continued_from = None
+    if session_id is not None:
+        history = sessions.history(session_id)
+        finished = [r.finished_at for r in sessions.get(session_id).runs if r.finished_at]
+        continued_from = max(finished) if history and finished else None
+    visible = notes.visible(workspace, session_id) if notes is not None else []
+    return RunContext(history, memory_preamble(visible, continued_from=continued_from))
+
+
+def note_store(settings: Settings) -> NoteStore | None:
+    return NoteStore(settings.memory_dir) if settings.memory else None
+
+
 def build_loop(
     settings: Settings,
     *,
@@ -61,15 +96,20 @@ def build_loop(
     approver: Approver,
     provider: LLMProvider | None = None,
     tracer: Tracer | None = None,
+    notes: NoteStore | None = None,
 ) -> AgentLoop:
+    tools = builtin_tools()
+    tools += plan_tools() if settings.planning else []
+    tools += note_tools() if settings.memory else []
     return AgentLoop(
         provider=provider or make_provider(settings),
-        registry=ToolRegistry(builtin_tools() + (plan_tools() if settings.planning else [])),
+        registry=ToolRegistry(tools),
         sink=sink,
         workspace=workspace,
         approver=approver,
         max_steps=settings.max_steps,
         tracer=tracer,
+        notes=notes if settings.memory else None,
     )
 
 
@@ -90,7 +130,8 @@ async def run_goal(
     run_id = new_run_id()
     run_dir = runs_root(settings, workspace) / run_id
     store = sessions or SessionStore(settings.sessions_dir)
-    history = store.history(session_id) if session_id is not None and settings.memory else []
+    notes = note_store(settings)
+    context = prepare_run(settings, workspace, session_id, store, notes)
     if session_id is not None:
         store.add_run(session_id, run_id, run_dir, goal)
     writer = JsonlEventWriter(run_dir / "events.jsonl")
@@ -102,10 +143,17 @@ async def run_goal(
         approver=approver,
         provider=provider,
         tracer=run_tracer(run_id, run_dir),
+        notes=notes,
     )
     status = "error"
     try:
-        result = await loop.run(goal, run_id, history=history, session_id=session_id)
+        result = await loop.run(
+            goal,
+            run_id,
+            history=context.history,
+            preamble=context.preamble,
+            session_id=session_id,
+        )
         status = result.status
     except BaseException:
         status = "cancelled"

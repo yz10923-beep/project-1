@@ -10,6 +10,7 @@ from kama_claude.core.bus.events import (
     Event,
     LLMDeltaEvent,
     LLMResponseEvent,
+    NoteUpdatedEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
@@ -21,6 +22,7 @@ from kama_claude.core.bus.events import (
     is_durable,
 )
 from kama_claude.core.plan import PLAN_TOOL_NAMES, PlanTask, render_task
+from kama_claude.core.tools.note_tools import NOTE_TOOL_NAMES
 
 
 class EventSink(Protocol):
@@ -78,6 +80,31 @@ class ConsolePrinter:
                 self._mid_line = True
             case RunStartedEvent():
                 self._p(f"run {event.run_id} · model={event.model} · workspace={event.workspace}")
+                if event.session_id:
+                    carried = f", continuing {event.history_messages} messages"
+                    self._p(
+                        f"  session {event.session_id}"
+                        + (carried if event.history_messages else " (new)")
+                        + (
+                            f", repaired {event.repaired} interrupted tool calls"
+                            if event.repaired
+                            else ""
+                        )
+                    )
+                if event.preamble:
+                    notes = event.preamble.count("\n- [")
+                    self._p(f"  memory: {notes} note(s) sent before the goal")
+            case NoteUpdatedEvent():
+                why = f" ({event.reason})" if event.reason else ""
+                vol = " [volatile]" if event.note.volatile else ""
+                self._p(
+                    f"  ✎ note {event.note.id} {event.action}{vol}: "
+                    f"{_one_line(event.note.text, 120)}{why}"
+                )
+            case ToolStartedEvent() if event.name in NOTE_TOOL_NAMES:
+                pass  # the note line says what changed
+            case ToolFinishedEvent() if event.name in NOTE_TOOL_NAMES and not event.is_error:
+                pass
             case ToolApprovalResolvedEvent() if event.by not in ("user", "auto"):
                 self._p(f"  ! approval {event.by}: {'approved' if event.approved else 'denied'}")
             case LLMResponseEvent():

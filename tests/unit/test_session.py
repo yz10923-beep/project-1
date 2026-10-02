@@ -99,7 +99,10 @@ async def test_second_run_continues_the_first_runs_conversation(
 
     sent = p2.requests[0].messages
     run1 = replay([], events_of(dir1))
-    assert sent == [*run1, {"role": "user", "content": "what did I ask?"}]
+    assert sent[:-1] == run1  # the whole first conversation, unchanged
+    preamble, goal = sent[-1]["content"]  # then memory (it continues) and the new goal
+    assert preamble["text"].startswith("<memory>\nThis conversation continues")
+    assert goal == {"type": "text", "text": "what did I ask?"}
     # the system prompt and earlier turns are byte-identical: the cache prefix holds
     assert p2.requests[0].system == p1.requests[0].system
     started = next(e for e in events_of(dir2) if isinstance(e, RunStartedEvent))
@@ -212,10 +215,8 @@ async def test_run_ending_on_a_user_turn_joins_the_next_goal(settings: Settings,
     await run_in(settings, ws, sid, "third", p3)
     sent = p3.requests[0].messages
     assert conversation_problems(sent) == []
-    assert sent[0]["content"] == [
-        {"type": "text", "text": "first"},
-        {"type": "text", "text": "second"},
-    ]
+    goals = [b["text"] for b in sent[0]["content"] if not b["text"].startswith("<memory>")]
+    assert goals == ["first", "second"]
     assert sent[-1]["content"][0]["type"] == "tool_result"
     assert sent[-1]["content"][-1] == {"type": "text", "text": "third"}
 
