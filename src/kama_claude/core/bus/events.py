@@ -43,6 +43,12 @@ class RunStartedEvent(_RunEvent):
     workspace: str
     max_steps: int
     planning: bool = Field(default=False, description="task_* tools offered (S3+).")
+    # S4: a run in a session continues the session's history (rebuilt from earlier runs'
+    # events) and may open with a memory preamble (notes) before the goal.
+    session_id: str | None = None
+    history_messages: int = Field(default=0, description="Messages carried in from the session.")
+    repaired: int = Field(default=0, description="Missing tool results added to that history.")
+    preamble: str | None = Field(default=None, description="Memory block sent before the goal.")
 
 
 class LLMResponseEvent(_RunEvent):

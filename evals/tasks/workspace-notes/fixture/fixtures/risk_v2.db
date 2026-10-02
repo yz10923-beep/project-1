@@ -1,0 +1,5 @@
+# current haircut schedule
+version=2
+equity=0.30
+govt=0.02
+corp=0.10

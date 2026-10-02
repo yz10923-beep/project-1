@@ -1,0 +1,19 @@
+[
+ {},
+ {
+  "tool_calls": [
+   [
+    "read_file",
+    {
+     "path": "CONTRIBUTING.md"
+    }
+   ],
+   [
+    "bash",
+    {
+     "command": "RISK_DB=fixtures/risk_v2.db python -m pytest -q"
+    }
+   ]
+  ]
+ }
+]

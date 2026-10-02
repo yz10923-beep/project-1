@@ -1,0 +1,19 @@
+# S4 memory, tier 3 (durable workspace notes): run 2 is a NEW session in the same
+# workspace, so nothing from run 1's conversation is available. The only way to run the
+# tests right first time without re-reading the docs is a note run 1 left behind. The
+# obvious setting (fixtures/risk.db) makes two tests fail; the right one
+# (fixtures/risk_v2.db) is buried in CONTRIBUTING.md.
+tags = ["memory", "notes", "cross-session", "finance", "positive"]
+max_steps = 20
+
+[[runs]]
+goal = """
+Find out how to run this project's test suite so that it passes, and tell me the exact
+command and how many tests pass. Don't modify any files.
+"""
+
+[[runs]]
+session = "new"
+goal = """
+Run the project's test suite and write just the number of passing tests to checks.txt.
+"""

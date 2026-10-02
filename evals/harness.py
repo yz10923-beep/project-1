@@ -34,12 +34,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kama_claude.core.agent.loop import RunResult
 from kama_claude.core.agent.prompts import system_prompt
 from kama_claude.core.agent.runner import make_provider, run_goal
 from kama_claude.core.bus.events import (
     EVENT_ADAPTER,
     Event,
     LLMResponseEvent,
+    PlanNoticeEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
     RunFinishedEvent,
@@ -51,6 +53,7 @@ from kama_claude.core.config import Settings
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import LLMProvider, ToolCall
 from kama_claude.core.plan import PLAN_TOOL_NAMES
+from kama_claude.core.session import SessionStore
 
 FLOW = "kama-run"
 EVALS_DIR = Path(__file__).resolve().parent
@@ -68,17 +71,51 @@ _IGNORED_PARTS = {"__pycache__", ".pytest_cache", ".kama"}
 
 
 @dataclass(frozen=True)
+class RunSpec:
+    """One goal of a task. Multi-run tasks (S4) send several goals to the same workspace,
+    continuing the session or starting a new one, to test what the agent remembers."""
+
+    goal: str
+    new_session: bool = False  # False: continue the previous run's session
+
+
+@dataclass(frozen=True)
 class Task:
     id: str
-    goal: str
+    goal: str  # the first run's goal
     tags: list[str]
     dir: Path
     max_steps: int | None = None
     oracle_reply: str = "Done."
+    runs: tuple[RunSpec, ...] = ()
 
     @property
     def fixture(self) -> Path:
         return self.dir / "fixture"
+
+    @property
+    def run_specs(self) -> tuple[RunSpec, ...]:
+        return self.runs or (RunSpec(self.goal),)
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """What one run of a multi-run task did, for checks on the trajectory (e.g. "run 2
+    used what run 1 learned without re-reading the log")."""
+
+    goal: str
+    status: str
+    final_text: str
+    tool_calls: tuple[tuple[str, dict[str, Any]], ...] = ()
+    changed: dict[str, str] = field(default_factory=dict)  # files this run changed
+    new_session: bool = False
+
+    def touched(self, needle: str) -> bool:
+        """Did any tool call mention `needle` (a path read, a command run)?"""
+        return any(needle in json.dumps(inp) for _, inp in self.tool_calls)
+
+    def commands(self) -> list[str]:
+        return [str(inp.get("command", "")) for name, inp in self.tool_calls if name == "bash"]
 
 
 @dataclass(frozen=True)
@@ -88,6 +125,7 @@ class Outcome:
     status: str
     final_text: str
     changed: dict[str, str] = field(default_factory=dict)  # relpath -> added|modified|deleted
+    runs: tuple[RunRecord, ...] = ()  # one per goal, in order (multi-run tasks)
 
 
 @dataclass(frozen=True)
@@ -104,14 +142,19 @@ def load_tasks(ids: Iterable[str] | None = None) -> list[Task]:
         if wanted is not None and d.name not in wanted:
             continue
         cfg = tomllib.loads(toml_path.read_text())
+        runs = tuple(
+            RunSpec(r["goal"].strip(), r.get("session", "same") == "new")
+            for r in cfg.get("runs", [])
+        )
         tasks.append(
             Task(
                 id=d.name,
-                goal=cfg["goal"].strip(),
+                goal=runs[0].goal if runs else cfg["goal"].strip(),
                 tags=list(cfg.get("tags", [])),
                 dir=d,
                 max_steps=cfg.get("max_steps"),
                 oracle_reply=cfg.get("oracle_reply", "Done."),
+                runs=runs,
             )
         )
     if wanted is not None and (missing := wanted - {t.id for t in tasks}):
@@ -175,13 +218,19 @@ def load_task_module(task_dir: Path, name: str) -> Any:
 
 
 DELETE_MANIFEST = "_delete.txt"
+SYNTHETIC_RUNS = "_runs.json"  # selftest only: the trajectory a solution stands for
 
 
 def apply_overlay(ws: Path, overlay: Path) -> None:
     """Copy an oracle/wrong/alt solution onto a workspace. A `_delete.txt` in the overlay
     lists glob patterns (one per line, relative to the workspace) to remove, so a
     solution can express deletions as well as edits."""
-    shutil.copytree(overlay, ws, dirs_exist_ok=True, ignore=shutil.ignore_patterns(DELETE_MANIFEST))
+    shutil.copytree(
+        overlay,
+        ws,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(DELETE_MANIFEST, SYNTHETIC_RUNS),
+    )
     manifest = overlay / DELETE_MANIFEST
     if not manifest.is_file():
         return
@@ -210,6 +259,42 @@ def fresh_workspace(task: Task, parent: Path, overlay: Path | None = None) -> Pa
     return ws
 
 
+def between_runs(task: Task, ws: Path, finished: int) -> None:
+    """The world moving on between runs (e.g. a rate file refreshed): setup.py's optional
+    `between(ws, finished)` hook, called after run `finished` (1-based) of a multi-run task."""
+    if (task.dir / "setup.py").is_file():
+        hook = getattr(load_task_module(task.dir, "setup"), "between", None)
+        if hook is not None:
+            hook(ws, finished)
+
+
+def synthetic_runs(
+    task: Task, overlay: Path | None, changed: dict[str, str], reply: str
+) -> tuple[RunRecord, ...]:
+    """Selftest stand-in for real runs: an overlay's `_runs.json` lists, per run,
+    {"tool_calls": [[name, input], ...], "final_text": ..., "changed": {...}}. Without one,
+    the runs made no tool calls and the last one made all the changes."""
+    specs = task.run_specs
+    raw: list[dict[str, Any]] = []
+    if overlay is not None and (overlay / SYNTHETIC_RUNS).is_file():
+        raw = json.loads((overlay / SYNTHETIC_RUNS).read_text())
+    records = []
+    for i, spec in enumerate(specs):
+        r = raw[i] if i < len(raw) else {}
+        last = i == len(specs) - 1
+        records.append(
+            RunRecord(
+                goal=spec.goal,
+                status="completed",
+                final_text=r.get("final_text", reply if last else ""),
+                tool_calls=tuple((n, inp) for n, inp in r.get("tool_calls", [])),
+                changed=r.get("changed", changed if last else {}),
+                new_session=spec.new_session,
+            )
+        )
+    return tuple(records)
+
+
 # ---------------------------------------------------------------- self-test
 
 
@@ -227,10 +312,13 @@ def selftest(tasks: list[Task]) -> list[str]:
         with tempfile.TemporaryDirectory() as tmp:
             ws = fresh_workspace(task, Path(tmp))
             before = snapshot(ws)
+            for finished in range(1, len(task.run_specs)):
+                between_runs(task, ws, finished)
             if overlay is not None:
                 apply_overlay(ws, overlay)
-            outcome = Outcome("completed", reply, diff_snapshots(before, snapshot(ws)))
-            return run_check(task, ws, outcome)
+            changed = diff_snapshots(before, snapshot(ws))
+            runs = synthetic_runs(task, overlay, changed, reply)
+            return run_check(task, ws, Outcome("completed", reply, changed, runs))
 
     for task in tasks:
         oracle = task.dir / "oracle"
@@ -355,10 +443,12 @@ def to_trace(task: Task, ws: Path, events: list[Event]) -> list[dict[str, Any]]:
     """Events -> the role-based transcript format eval viewers render."""
     turns: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt(ws, planning=_planning(events))},
-        {"role": "user", "content": task.goal},
     ]
     for e in events:
-        if isinstance(e, LLMResponseEvent):
+        if isinstance(e, RunStartedEvent):  # one per run: multi-run tasks have several
+            goal = f"{e.preamble}\n\n{e.goal}" if e.preamble else e.goal
+            turns.append({"role": "user", "content": goal})
+        elif isinstance(e, LLMResponseEvent):
             thinking = "".join(b.get("thinking", "") for b in e.content if b["type"] == "thinking")
             for b in e.content:
                 if b["type"] == "text" and b.get("text", "").strip():
@@ -375,7 +465,7 @@ def to_trace(task: Task, ws: Path, events: list[Event]) -> list[dict[str, Any]]:
                 turns[-1]["thinking"] = thinking
         elif isinstance(e, ToolFinishedEvent):
             turns.append({"role": "tool_result", "name": e.name, "content": e.output})
-        elif isinstance(e, PlanReminderEvent):
+        elif isinstance(e, PlanReminderEvent | PlanNoticeEvent):
             turns.append({"role": "user", "content": e.text})
     return turns
 
@@ -406,6 +496,52 @@ def done_keys(variant_dir: Path) -> set[tuple[str, int]]:
     return {(r["prompt_id"], r["rep"]) for r in rows}
 
 
+@dataclass
+class _Ran:
+    result: RunResult
+    run_dir: Path
+    events: list[Event]
+    record: RunRecord
+
+
+async def _run_all(task: Task, ws: Path, settings: Settings, provider: LLMProvider) -> list[_Ran]:
+    """Run each goal of the task in order. A multi-run task keeps one session going
+    (or starts a new one where the task says so) in a per-trial store, so trials never
+    share memory. Stops early if a run ends with an API/internal error."""
+    multi = len(task.run_specs) > 1
+    store = SessionStore(settings.sessions_dir)
+    session_id: str | None = None
+    out: list[_Ran] = []
+    for i, spec in enumerate(task.run_specs):
+        if i > 0:
+            between_runs(task, ws, i)
+        if multi and (session_id is None or spec.new_session):
+            session_id = store.create(ws).session_id
+        before = snapshot(ws)
+        result, run_dir = await run_goal(
+            spec.goal,
+            settings=settings,
+            workspace=ws,
+            approver=_allow_all,
+            provider=provider,
+            session_id=session_id,
+            sessions=store,
+        )
+        events = read_events(run_dir / "events.jsonl")
+        record = RunRecord(
+            goal=spec.goal,
+            status=result.status,
+            final_text=result.final_text,
+            tool_calls=tuple((e.name, e.input) for e in events if isinstance(e, ToolStartedEvent)),
+            changed=diff_snapshots(before, snapshot(ws)),
+            new_session=spec.new_session,
+        )
+        out.append(_Ran(result, run_dir, events, record))
+        if result.status == "error":
+            break
+    return out
+
+
 async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | None:
     """Run one (task, rep) until it yields a scorable row. Failed attempts -> errors.jsonl."""
     vdir = cfg.variant_dir
@@ -416,7 +552,12 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
             events_dir = vdir / "events" / f"{task.id}_rep{rep}_a{attempt}"
             if events_dir.exists():
                 shutil.rmtree(events_dir)  # left over from an interrupted earlier run
-            overrides: dict[str, Any] = {"runs_dir": events_dir}
+            overrides: dict[str, Any] = {
+                "runs_dir": events_dir,
+                # per trial: notes and sessions must never leak between trials
+                "sessions_dir": events_dir / "sessions",
+                "memory_dir": events_dir / "memory",
+            }
             if task.max_steps:
                 overrides["max_steps"] = task.max_steps
             settings = cfg.settings.model_copy(update=overrides)
@@ -425,22 +566,16 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
 
             t0 = time.monotonic()
             try:
-                result, run_dir = await asyncio.wait_for(
-                    run_goal(
-                        task.goal,
-                        settings=settings,
-                        workspace=ws,
-                        approver=_allow_all,
-                        provider=provider,
-                    ),
-                    timeout=cfg.timeout_s,
+                ran = await asyncio.wait_for(
+                    _run_all(task, ws, settings, provider), timeout=cfg.timeout_s
                 )
             except TimeoutError:
                 # A hard ceiling, recorded as a timeout, never as a zero score.
                 _append(vdir / "errors.jsonl", {**err_base, "class": "timeout"})
                 return None
             wall_s = time.monotonic() - t0
-            events = read_events(run_dir / "events.jsonl")
+            events = [e for r in ran for e in r.events]
+            result = ran[-1].result
             usage = _usage_sum(events)
             llm = [e for e in events if isinstance(e, LLMResponseEvent)]
             served = sorted({e.model for e in llm})
@@ -474,7 +609,10 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 continue
 
             outcome = Outcome(
-                result.status, result.final_text, diff_snapshots(before, snapshot(ws))
+                result.status,
+                result.final_text,
+                diff_snapshots(before, snapshot(ws)),
+                tuple(r.record for r in ran),
             )
             try:
                 check = run_check(task, ws, outcome)
@@ -489,7 +627,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
             trace_path.parent.mkdir(parents=True, exist_ok=True)
             trace_path.write_text(json.dumps(to_trace(task, ws, events), indent=1))
             tools = [e for e in events if isinstance(e, ToolFinishedEvent)]
-            return {
+            row: dict[str, Any] = {
                 "prompt_id": task.id,
                 "rep": rep,
                 "prompt": task.goal,
@@ -505,7 +643,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 "explanation": {"passed": check.reason},
                 "model": served[0] if served else settings.model,
                 "usage": usage,
-                "steps": result.steps,
+                "steps": sum(r.result.steps for r in ran),
                 "tool_calls": len(tools),
                 "tool_errors": sum(e.is_error for e in tools),
                 "plan": plan_metrics(events),
@@ -516,11 +654,24 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                     "changed": outcome.changed,
                     "final_text": result.final_text[-2000:],
                     "leak_suspect": _leak_suspect(events),
-                    "events": str(run_dir.relative_to(vdir)),
+                    "events": [str(r.run_dir.relative_to(vdir)) for r in ran],
                     "harness_sha": harness_sha(),
                     "effort": getattr(provider, "effort", settings.effort),
+                    "memory": settings.memory,
                 },
             }
+            if len(task.run_specs) > 1:
+                row["runs"] = [
+                    {
+                        "status": r.result.status,
+                        "steps": r.result.steps,
+                        "tool_calls": len(r.record.tool_calls),
+                        "new_session": r.record.new_session,
+                        "usage": _usage_sum(r.events),
+                    }
+                    for r in ran
+                ]
+            return row
     return None
 
 

@@ -1,0 +1,22 @@
+[
+ {
+  "tool_calls": [
+   [
+    "bash",
+    {
+     "command": "grep REJECTED logs/oms.log | wc -l"
+    }
+   ]
+  ]
+ },
+ {
+  "tool_calls": [
+   [
+    "bash",
+    {
+     "command": "grep 2024-03-15 logs/oms.log | head"
+    }
+   ]
+  ]
+ }
+]

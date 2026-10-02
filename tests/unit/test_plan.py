@@ -10,11 +10,11 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from kama_claude.core.agent.history import replay
 from kama_claude.core.agent.loop import AgentLoop, plan_reminder
 from kama_claude.core.agent.runner import build_loop
 from kama_claude.core.bus.events import (
     Event,
-    LLMResponseEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
@@ -22,7 +22,7 @@ from kama_claude.core.bus.events import (
     ToolFinishedEvent,
 )
 from kama_claude.core.config import Settings
-from kama_claude.core.llm.types import LLMResponse, Message, ToolCall
+from kama_claude.core.llm.types import LLMResponse, ToolCall
 from kama_claude.core.plan import (
     MAX_TASKS,
     PLAN_TOOL_NAMES,
@@ -305,37 +305,6 @@ def update(tid: str, task_id: int, status: str, note: str | None = None) -> Any:
     return (tid, "task_update", {"updates": [change]})
 
 
-def rebuild_messages(goal: str, events: list[Event]) -> list[Message]:
-    """The conversation, from events.jsonl alone (the S1 invariant, now with reminders)."""
-    msgs: list[Message] = [{"role": "user", "content": goal}]
-    results: list[dict[str, Any]] = []
-    for e in events:
-        if isinstance(e, LLMResponseEvent | PlanReminderEvent) and results:
-            msgs.append({"role": "user", "content": results})
-            results = []
-        if isinstance(e, LLMResponseEvent):
-            msgs.append({"role": "assistant", "content": e.content})
-        elif isinstance(e, ToolFinishedEvent):
-            block: dict[str, Any] = {
-                "type": "tool_result",
-                "tool_use_id": e.tool_use_id,
-                "content": e.output,
-            }
-            if e.is_error:
-                block["is_error"] = True
-            results.append(block)
-        elif isinstance(e, PlanReminderEvent):
-            msgs.append({"role": "user", "content": e.text})
-        elif isinstance(e, PlanNoticeEvent):
-            if results:
-                msgs.append({"role": "user", "content": results})
-                results = []
-            last = msgs[-1]["content"]
-            blocks = [{"type": "text", "text": last}] if isinstance(last, str) else list(last)
-            msgs[-1] = {"role": "user", "content": [*blocks, {"type": "text", "text": e.text}]}
-    return msgs
-
-
 async def test_plan_is_offered_kept_and_emitted_as_snapshots(tmp_path: Path) -> None:
     p = ScriptedProvider(
         [
@@ -399,7 +368,7 @@ async def test_stopping_with_open_tasks_gets_one_reminder(tmp_path: Path) -> Non
     assert after_stop[-2]["role"] == "assistant"
     assert after_stop[-1] == {"role": "user", "content": reminder.text}
     # events.jsonl still reconstructs exactly what the model was sent
-    assert rebuild_messages("goal", sink.events)[:-1] == p.requests[-1].messages
+    assert replay([], sink.events)[:-1] == p.requests[-1].messages
 
 
 async def test_reminder_is_sent_only_once(tmp_path: Path) -> None:
@@ -689,7 +658,7 @@ async def test_user_edit_reaches_the_model_at_its_next_call(tmp_path: Path) -> N
     assert sent[-1]["text"] == notice.text
     # earlier turns untouched, and events.jsonl rebuilds exactly what was sent
     assert p.requests[2].messages[: len(p.requests[1].messages)] == p.requests[1].messages
-    assert rebuild_messages("g", sink.events)[:-1] == p.requests[-1].messages
+    assert replay([], sink.events)[:-1] == p.requests[-1].messages
 
 
 async def test_edit_while_a_tool_runs_is_not_credited_to_that_tool(tmp_path: Path) -> None:
@@ -758,7 +727,7 @@ async def test_notice_waits_for_a_user_turn_after_pause_turn(tmp_path: Path) -> 
     assert notice.step == 4
     assert p.requests[2].messages[-1]["role"] == "assistant"  # resumed as-is
     assert p.requests[3].messages[-1]["content"][-1]["text"] == notice.text
-    assert rebuild_messages("g", sink.events)[:-1] == p.requests[-1].messages
+    assert replay([], sink.events)[:-1] == p.requests[-1].messages
 
 
 async def test_rejected_edits(tmp_path: Path) -> None:

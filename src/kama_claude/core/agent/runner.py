@@ -14,6 +14,7 @@ from kama_claude.core.agent.sinks import EventSink, FanoutSink, JsonlEventWriter
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.anthropic_provider import AnthropicProvider
 from kama_claude.core.llm.types import LLMProvider
+from kama_claude.core.session import SessionStore
 from kama_claude.core.tools.builtin import builtin_tools
 from kama_claude.core.tools.plan_tools import plan_tools
 from kama_claude.core.tools.registry import ToolRegistry
@@ -80,10 +81,18 @@ async def run_goal(
     approver: Approver,
     provider: LLMProvider | None = None,
     extra_sink: EventSink | None = None,
+    session_id: str | None = None,
+    sessions: SessionStore | None = None,
 ) -> tuple[RunResult, Path]:
-    """Run one goal to completion in this process. Returns the result and the run dir."""
+    """Run one goal to completion in this process. Returns the result and the run dir.
+    With `session_id`, the run continues that session (its history, unless memory is
+    off) and is recorded in it."""
     run_id = new_run_id()
     run_dir = runs_root(settings, workspace) / run_id
+    store = sessions or SessionStore(settings.sessions_dir)
+    history = store.history(session_id) if session_id is not None and settings.memory else []
+    if session_id is not None:
+        store.add_run(session_id, run_id, run_dir, goal)
     writer = JsonlEventWriter(run_dir / "events.jsonl")
     sink: EventSink = FanoutSink(writer, extra_sink) if extra_sink else writer
     loop = build_loop(
@@ -94,8 +103,15 @@ async def run_goal(
         provider=provider,
         tracer=run_tracer(run_id, run_dir),
     )
+    status = "error"
     try:
-        result = await loop.run(goal, run_id)
+        result = await loop.run(goal, run_id, history=history, session_id=session_id)
+        status = result.status
+    except BaseException:
+        status = "cancelled"
+        raise
     finally:
         writer.close()
+        if session_id is not None:
+            store.finish_run(session_id, run_id, status)
     return result, run_dir

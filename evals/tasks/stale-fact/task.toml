@@ -1,0 +1,19 @@
+# S4 memory guard: memory must not make the agent trust stale data. Run 1 reads the
+# EURUSD reference rate; between the runs the market-data job refreshes it
+# (setup.py:between); run 2, in the same session, must use the rate as it is now, not
+# the one in its history or notes. An agent with no memory passes this trivially; the
+# point is that adding memory must not break it. Finance's version of a stale cache.
+tags = ["memory", "staleness", "guard", "finance", "positive"]
+max_steps = 15
+
+[[runs]]
+goal = """
+What is our total EUR exposure in positions.csv, converted to USD at the reference rate
+in config/fx.toml? Just tell me; don't create or change any files.
+"""
+
+[[runs]]
+goal = """
+Write our EUR exposure in USD to usd.json as {"usd": <number>}, rounded to 2 decimals,
+using the current reference rate.
+"""

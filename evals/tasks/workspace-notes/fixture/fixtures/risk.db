@@ -1,0 +1,5 @@
+# pre-2024 snapshot, kept for the migration test only
+version=1
+equity=0.25
+govt=0.02
+corp=0.08

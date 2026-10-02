@@ -1,0 +1,13 @@
+[
+ {},
+ {
+  "tool_calls": [
+   [
+    "bash",
+    {
+     "command": "RISK_DB=fixtures/risk_v2.db python -m pytest -q"
+    }
+   ]
+  ]
+ }
+]

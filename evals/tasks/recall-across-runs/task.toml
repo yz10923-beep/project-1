@@ -1,0 +1,20 @@
+# S4 memory, tier 2 (session history): run 2 acts on "that venue" from run 1 in the
+# same session. Graded on the end state AND the trajectory: run 2 must not open the
+# log again, and run 1 must not write the answer early. The log is generated
+# (setup.py) with explicit traps: the whole-file answer, `grep REJECTED` (counts
+# CANCEL_REJECTED), and the whole-file top reason all differ from the right answer.
+tags = ["memory", "session", "logs", "finance", "positive"]
+max_steps = 20
+
+[[runs]]
+goal = """
+Our order management system log is logs/oms.log (timestamps are UTC). On 2024-03-15,
+which venue rejected the most orders (status=REJECTED; cancel rejections don't count),
+and what was the most common reject reason code for that venue that day? Just tell me
+the answer; don't create or change any files.
+"""
+
+[[runs]]
+goal = """
+Good. Record that in incident.json as {"venue": "...", "reason_code": "..."}.
+"""

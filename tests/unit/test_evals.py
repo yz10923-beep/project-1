@@ -237,3 +237,83 @@ async def test_summary_counts_trials_that_ran_out_of_steps(tmp_path: Path) -> No
     await run_suite(load_tasks(["fix-add-bug"]), cfg)
     assert rows(cfg)[0]["run_status"] == "max_steps"
     assert "- ended at max_steps: 1 trial(s) (fix-add-bug)" in summarize(cfg.variant_dir)
+
+
+def recall_script() -> list[LLMResponse | LLMError]:
+    """Run 1 looks the answer up; run 2 writes it from memory without the log."""
+    incident = json.dumps({"venue": "ARCX", "reason_code": "R07"})
+    return [
+        tool_response(("g", "bash", {"command": "grep 2024-03-15 logs/oms.log | wc -l"})),
+        text_response("ARCX rejected the most orders on 2024-03-15; top reason R07."),
+        tool_response(("w", "write_file", {"path": "incident.json", "content": incident})),
+        text_response("Recorded."),
+    ]
+
+
+async def test_multi_run_task_runs_in_one_session_and_grades_the_trajectory(
+    tmp_path: Path,
+) -> None:
+    providers: list[ScriptedProvider] = []
+
+    def factory(s: Settings) -> ScriptedProvider:
+        providers.append(ScriptedProvider(recall_script()))
+        return providers[-1]
+
+    cfg = cfg_for(tmp_path, factory)
+    await run_suite(load_tasks(["recall-across-runs"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 1.0, row["explanation"]
+    assert [r["status"] for r in row["runs"]] == ["completed", "completed"]
+    assert row["steps"] == 4 and len(row["meta"]["events"]) == 2
+    # run 2 was sent run 1's conversation: that is what made the re-read unnecessary
+    run2_first = providers[0].requests[2].messages
+    assert run2_first[0]["content"].startswith("Our order management system log")
+    assert run2_first[-1]["content"].startswith("Good. Record that")
+    trace = json.loads((cfg.variant_dir / "traces" / "recall-across-runs_rep0.json").read_text())
+    assert [t["content"][:4] for t in trace if t["role"] == "user"] == ["Our ", "Good"]
+
+
+async def test_memory_off_runs_each_goal_fresh(tmp_path: Path) -> None:
+    providers: list[ScriptedProvider] = []
+
+    def factory(s: Settings) -> ScriptedProvider:
+        providers.append(ScriptedProvider(recall_script()))
+        return providers[-1]
+
+    cfg = cfg_for(tmp_path, factory)
+    cfg.settings = cfg.settings.model_copy(update={"memory": False})
+    await run_suite(load_tasks(["recall-across-runs"]), cfg)
+    [row] = rows(cfg)
+    assert row["meta"]["memory"] is False
+    assert providers[0].requests[2].messages == [
+        {"role": "user", "content": load_tasks(["recall-across-runs"])[0].run_specs[1].goal}
+    ]
+
+
+async def test_between_hook_changes_the_world_between_runs(tmp_path: Path) -> None:
+    # stale-fact: the rate file is refreshed after run 1; a run 2 that re-reads it passes
+    script: list[LLMResponse | LLMError] = [
+        tool_response(("r", "read_file", {"path": "config/fx.toml"})),
+        text_response("1,356,250.00 USD at 1.0850."),
+        tool_response(("r2", "read_file", {"path": "config/fx.toml"})),
+        tool_response(("w", "write_file", {"path": "usd.json", "content": '{"usd": 1365000.0}'})),
+        text_response("Done, at the refreshed 1.0920."),
+    ]
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(list(script)))
+    await run_suite(load_tasks(["stale-fact"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 1.0, row["explanation"]
+
+
+OMS_LOG_SHA = "5f59700c4a849992f2d01285c5e9d06100997a5eb28249acd4666aecb8581dd5"
+
+
+def test_recall_log_is_frozen(tmp_path: Path) -> None:
+    """Scores are comparable across runs only if every trial sees the same bytes."""
+    import hashlib
+
+    from evals.harness import TASKS_DIR, load_task_module
+
+    load_task_module(TASKS_DIR / "recall-across-runs", "setup").setup(tmp_path)
+    digest = hashlib.sha256((tmp_path / "logs" / "oms.log").read_bytes()).hexdigest()
+    assert digest == OMS_LOG_SHA

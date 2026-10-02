@@ -1,0 +1,6 @@
+# Reference FX rates (USD per unit), refreshed by the market-data job.
+as_of = "2024-03-15T16:00:00Z"
+
+[rates]
+EURUSD = 1.0850
+GBPUSD = 1.2710

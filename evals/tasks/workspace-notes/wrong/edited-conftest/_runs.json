@@ -1,0 +1,13 @@
+[
+ {},
+ {
+  "tool_calls": [
+   [
+    "bash",
+    {
+     "command": "python -m pytest -q"
+    }
+   ]
+  ]
+ }
+]

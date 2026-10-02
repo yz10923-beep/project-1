@@ -39,6 +39,11 @@ class Settings(BaseModel):
     refusal_fallback: bool = True
     # S3: offer the task_* tools and nudge the model when it stops with open tasks.
     planning: bool = True
+    # S4: runs in a session continue its history and get notes; false = every run starts
+    # from nothing (the A/B baseline for memory).
+    memory: bool = True
+    sessions_dir: Path = Path("~/.kama/sessions")
+    memory_dir: Path = Path("~/.kama/memory")  # durable notes, per workspace
     # Outside any workspace, so the agent never reads its own (or other runs') logs.
     runs_dir: Path = Path("~/.kama/runs")
     anthropic_api_key: SecretStr | None = None

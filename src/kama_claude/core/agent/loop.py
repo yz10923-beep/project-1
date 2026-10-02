@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kama_claude.core.agent.history import start_run_messages
 from kama_claude.core.agent.prompts import system_prompt
 from kama_claude.core.agent.sinks import EventSink
 from kama_claude.core.bus.events import (
@@ -189,11 +190,21 @@ class AgentLoop:
         self._seq += 1
         return meta
 
-    async def run(self, goal: str, run_id: str) -> RunResult:
+    async def run(
+        self,
+        goal: str,
+        run_id: str,
+        *,
+        history: list[Message] | None = None,
+        preamble: str | None = None,
+        session_id: str | None = None,
+    ) -> RunResult:
+        """Run one goal. In a session, `history` is the conversation so far (rebuilt from
+        earlier runs' events) and `preamble` the memory block sent before the goal."""
         with self._tracer.span("run", "agent", model=self._provider.model) as span:
             self._run_span_id, self._task_clocks = span.span_id, {}
             try:
-                result = await self._run(goal, run_id)
+                result = await self._run(goal, run_id, history or [], preamble, session_id)
             finally:
                 self._close_task_spans()
             span.set(status=result.status, steps=result.steps, **result.usage.model_dump())
@@ -239,13 +250,21 @@ class AgentLoop:
             if t.id in self._task_clocks:
                 self._record_task_span(t, still_open=True)
 
-    async def _run(self, goal: str, run_id: str) -> RunResult:
+    async def _run(
+        self,
+        goal: str,
+        run_id: str,
+        history: list[Message],
+        preamble: str | None,
+        session_id: str | None,
+    ) -> RunResult:
         t0 = time.monotonic()
         self._seq = 0
         self._ctx = ToolContext(workspace=self._ctx.workspace, plan=Plan())
         state = self._state = _RunState()
         self._pending_notices = []
         self._run_id = run_id
+        messages, repaired = start_run_messages(history, goal, preamble)
         await self._sink.emit(
             RunStartedEvent(
                 **self._meta(run_id),
@@ -254,6 +273,10 @@ class AgentLoop:
                 workspace=str(self._ctx.workspace),
                 max_steps=self._max_steps,
                 planning=self._planning,
+                session_id=session_id,
+                history_messages=len(history),
+                repaired=repaired,
+                preamble=preamble,
             )
         )
 
@@ -281,7 +304,6 @@ class AgentLoop:
 
         system = system_prompt(self._ctx.workspace, planning=self._planning)
         tools = self._registry.specs()
-        messages: list[Message] = [{"role": "user", "content": goal}]
 
         try:
             allowance = plan_step_allowance(self._max_steps) if self._planning else 0
