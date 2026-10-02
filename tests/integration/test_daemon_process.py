@@ -150,3 +150,25 @@ async def test_tui_drives_a_planned_run_through_the_real_stack(
     assert "reminded the model" in log and "■ completed after 6 steps" in log
     assert "Python 3" in log  # the bash output, inside the tool block
     assert "completed · step 6" in status and "plan 2/2" in status
+
+
+def test_session_and_notes_end_to_end(tmp_path: Path, fake_stack: Daemon) -> None:
+    """S4 through every real layer: run 1 starts a session and saves a note; run 2
+    continues the session (history replayed from disk) and opens with that note."""
+    d = fake_stack
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    first = run_cli("run", "-y", "--new-session", "-w", str(ws), "check python", env=d.env)
+    assert first.returncode == 0, first.stderr
+    assert "  ✎ note w1 added: python3 is on PATH here" in first.stdout
+    sid = first.stdout.split("session ", 1)[1].split()[0]
+    second = run_cli("run", "-y", "--session", sid, "-w", str(ws), "and now?", env=d.env)
+    assert second.returncode == 0, second.stderr
+    assert f"  session {sid}, continuing" in second.stdout
+    assert "  memory: 1 note(s) sent before the goal" in second.stdout
+    shown = run_cli("session", "show", sid, env=d.env)
+    assert shown.stdout.count("completed") == 2
+    notes = run_cli("notes", "list", "-w", str(ws), env=d.env)
+    assert "[w1] python3 is on PATH here" in notes.stdout
+    trace = run_cli("trace", env=d.env)
+    assert f"memory  continues session {sid}" in trace.stdout

@@ -288,6 +288,7 @@ async def test_memory_off_runs_each_goal_fresh(tmp_path: Path) -> None:
     await run_suite(load_tasks(["recall-across-runs"]), cfg)
     [row] = rows(cfg)
     assert row["meta"]["memory"] is False
+    assert row["memory"] is None
     assert providers[0].requests[2].messages == [
         {"role": "user", "content": load_tasks(["recall-across-runs"])[0].run_specs[1].goal}
     ]
@@ -348,6 +349,18 @@ async def test_workspace_note_carries_across_sessions_in_a_trial(tmp_path: Path)
     [row] = rows(cfg)
     assert row["grade"]["passed"] == 1.0, row["explanation"]
     assert [r["new_session"] for r in row["runs"]] == [False, True]
+    assert row["memory"] == {
+        "runs_continuing": 0,  # run 2 is a new session: no history, only the note
+        "runs_with_notes": 1,
+        "notes_saved": 1,
+        "notes_updated": 0,
+        "notes_deleted": 0,
+        "volatile_saved": 0,
+    }
+    assert (
+        "- memory: notes saved in 1/1 trials (1 notes, 0 volatile) · runs that opened "
+        "with notes: 1 · multi-run trials passed: 1/1"
+    ) in summarize(cfg.variant_dir)
     run2_opening = providers[0].requests[3].messages
     assert len(run2_opening) == 1  # new session: no history...
     assert f"Run tests with: {cmd}" in run2_opening[0]["content"][0]["text"]  # ...but the note

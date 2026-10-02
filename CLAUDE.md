@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S3 done (full version; Haiku A/B re-run pending) → S4 next**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S4 done (full version; memory A/B pending) → S5 next**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -83,7 +83,10 @@ uv run kama run --detach "..."        # print run id and return; the run keeps g
 uv run kama attach RUN_ID             # watch (and answer approvals) from another terminal
 uv run kama runs | kama cancel RUN_ID
 uv run kama plan show|add|cancel RUN_ID ...   # read a plan; steer a live one
-uv run kama tui [RUN_ID] [-w DIR] [-y]    # full-screen UI (also: kama-tui)
+uv run kama tui [RUN_ID] [-w DIR] [-y] [--session ID]   # full-screen UI (also: kama-tui)
+uv run kama chat [-w DIR] [-y] [--session ID]    # a conversation: each line a run in one session
+uv run kama run --new-session|--session ID "..."  # runs that share a conversation
+uv run kama session list|show ID · kama notes list|add|edit|rm   # sessions; the agent's memory
 uv run kama run --local "..."         # in-process, no daemon (S1 behaviour)
 uv run kama trace [RUN_ID]            # where a run's time/tokens/cost went (default: latest)
 uv run kama trace RUN_ID --chrome t.json   # open in https://ui.perfetto.dev
@@ -100,7 +103,9 @@ Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the
 `~/.kama/.env` so it works from any workspace): `ANTHROPIC_API_KEY`, `KAMA_MODEL` (default `claude-opus-5`),
 `KAMA_MAX_STEPS` (30), `KAMA_MAX_TOKENS` (16000), `KAMA_EFFORT` (unset = API default),
 `KAMA_REFUSAL_FALLBACK` (true; only sent for models that support it), `KAMA_PLANNING` (true;
-false = no task_* tools, the S2 agent, for A/B runs), `KAMA_RUNS_DIR` (`~/.kama/runs`),
+false = no task_* tools, the S2 agent, for A/B runs), `KAMA_MEMORY` (true; false = no session
+history and no notes, the S3 agent), `KAMA_SESSIONS_DIR` (`~/.kama/sessions`), `KAMA_MEMORY_DIR`
+(`~/.kama/memory`), `KAMA_RUNS_DIR` (`~/.kama/runs`),
 `KAMA_TOKEN_FILE` (`~/.kama/core.token`), `KAMA_APPROVAL_TIMEOUT_S` (600).
 
 ### Layout
@@ -119,7 +124,9 @@ src/kama_claude/
     llm/types.py         LLMProvider protocol, LLMResponse (raw blocks + parsed views), Usage
     llm/anthropic_provider.py  Messages API via raw SDK (streamed); TTFT; errors; caching
     llm/pricing.py       one price table; cost_usd(model, usage) (None if unpriced)
-    plan.py              Plan (a run's task list: add/update/render), PlanTask, statuses
+    plan.py              Plan (a run's task DAG: add/update/render), PlanTask, statuses
+    session.py           SessionStore: a session = its runs in order; history replayed from events
+    notes.py             NoteStore (workspace/session scope), NoteBook, memory_preamble()
     trace/span.py        Span: trace_id, span_id, parent_id, kind (agent|llm|tool|bus|ipc)
     trace/tracer.py      Tracer: span() context manager (ContextVar parents), record()
     trace/analyze.py     summarize() (pure), render() text report, to_chrome() export
@@ -127,24 +134,28 @@ src/kama_claude/
     tools/registry.py    validate input -> run -> every failure becomes an is_error result
     tools/builtin.py     read_file, list_dir, write_file, bash
     tools/plan_tools.py  task_create, task_update (batched), task_get, task_list (no approval)
+    tools/note_tools.py  note_save, note_update, note_delete, note_list (no approval)
     agent/loop.py        AgentLoop: model -> tools -> results -> repeat; emits run events
+    agent/history.py     replay() events -> messages; repair_orphans(); conversation_problems()
     agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
-    agent/runner.py      build_loop(), run_goal() (in-process: --local, evals)
+    agent/runner.py      build_loop(), prepare_run() (history + memory block), run_goal()
     agent/manager.py     RunManager (daemon): runs, fan-out with replay, approvals, cancel
-  cli/main.py            run / attach / runs / cancel / plan / ping / trace / tui; watch()
+  cli/main.py            run / attach / runs / cancel / plan / chat / session / notes / ping /
+                         trace / tui; watch()
   tui/state.py           RunView: pure fold of a run's events (dedupe, cost, plan, approvals)
   tui/app.py             Textual app: log, plan panel, approvals, steering, runs, trace, reconnect
 scripts/fake_api.py      fake streaming Messages API with realistic timing (offline smoke tests)
 tests/fakes.py           ScriptedProvider (streams its text), GatedProvider, PausingProvider
 tests/unit/              protocol, config, server, tools, loop, plan, provider (mock SSE), daemon,
                          CLI, TUI (Textual Pilot against an in-process kama-core)
-tests/integration/       real daemon + CLI subprocesses
+tests/integration/       real daemon + CLI subprocesses (+ the TUI and sessions via the fake API)
 tests/live/              real API; deselected by default
 evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
 evals/run_evals.py       CLI: list / selftest / run / summary; harness-approval gate
 evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ + wrong/*/ + [alt/*/]
                          (log-error-triage is the reference task; `_delete.txt` in a solution deletes;
-                         risk-report-spec grades 10 requirements separately, wrong/ from make_answers.py)
+                         risk-report-spec grades 10 requirements separately, wrong/ from make_answers.py;
+                         multi-run tasks: [[runs]] + setup.py between() + _runs.json in solutions)
 evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/ git-ignored)
 ```
 
@@ -210,6 +221,15 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
 - Each stretch of a task in_progress is a `plan` span (monotonic duration) under `run`.
 - The TUI is a thin client: everything over the protocol, state folded in `RunView`, and
   after a reconnect it resumes from `next_seq` (nothing shown twice or missed).
+- A session stores no messages: its history is `replay`ed from its runs' events.jsonl, and
+  the loop builds messages with the same helpers. A continuing run repairs unanswered
+  tool_use blocks (is_error results) and records `repaired` in run.started; a trailing user
+  turn is joined, never doubled. At most one run per session at a time.
+- Notes live outside the workspace, carry source/author/age/volatile, and reach the model
+  only as a `<memory>` block before the goal in the run's first user message (never the
+  system prompt), framed as past observations, not instructions. No notes and no history
+  = no block (request unchanged). KAMA_MEMORY=false = the S3 agent, byte for byte.
+- Tests never touch the real home directory: an autouse fixture sets HOME per test.
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

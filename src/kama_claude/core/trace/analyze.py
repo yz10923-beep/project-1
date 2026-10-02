@@ -65,6 +65,12 @@ class TraceSummary:
     plan_only_steps: int = 0
     plan_only_ms: float = 0.0
     task_spans: list[Span] = field(default_factory=list)  # one per task worked on, by id
+    # S4 memory: what the run started from and what it left behind
+    session_id: str | None = None
+    history_messages: int = 0
+    memory_notes: int = 0
+    memory_chars: int = 0
+    notes_changed: int = 0
 
     @property
     def other_ms(self) -> float:
@@ -94,6 +100,11 @@ def summarize(spans: list[Span]) -> TraceSummary:
         steps=int(run.attrs.get("steps", 0)),
         tokens={k: 0 for k in _TOKEN_KEYS},
     )
+    summary.session_id = run.attrs.get("session_id")
+    summary.history_messages = int(run.attrs.get("history_messages", 0))
+    summary.memory_notes = int(run.attrs.get("memory_notes", 0))
+    summary.memory_chars = int(run.attrs.get("memory_chars", 0))
+    summary.notes_changed = int(run.attrs.get("notes_changed", 0))
     if "plan_tasks" in run.attrs:
         summary.plan = {
             k.removeprefix("plan_"): int(v) for k, v in run.attrs.items() if k.startswith("plan_")
@@ -222,6 +233,18 @@ def render(spans: list[Span], width: int = 40) -> str:
                     else ""
                 )
             )
+    if s.session_id or s.memory_notes or s.notes_changed:
+        where = (
+            f"continues session {s.session_id} ({s.history_messages} messages carried in)"
+            if s.history_messages
+            else f"session {s.session_id} (first run)"
+            if s.session_id
+            else "no session"
+        )
+        lines.append(
+            f"memory  {where} · {s.memory_notes} note(s) sent "
+            f"(~{s.memory_chars // 4} tokens) · {s.notes_changed} note change(s)"
+        )
     lines += ["", "timeline" + " " * 21 + "|" + "-" * width + "|"]
     run_start = min(x.start_ns for x in spans if x.name == "run")
     depths = _depths(spans)

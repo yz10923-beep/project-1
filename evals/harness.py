@@ -41,6 +41,7 @@ from kama_claude.core.bus.events import (
     EVENT_ADAPTER,
     Event,
     LLMResponseEvent,
+    NoteUpdatedEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
@@ -439,6 +440,20 @@ def plan_metrics(events: list[Event]) -> dict[str, int] | None:
     }
 
 
+def memory_metrics(events: list[Event]) -> dict[str, int]:
+    """What memory did across a trial's runs (rows of memory-off trials hold None)."""
+    starts = [e for e in events if isinstance(e, RunStartedEvent)]
+    changes = [e for e in events if isinstance(e, NoteUpdatedEvent)]
+    return {
+        "runs_continuing": sum(e.history_messages > 0 for e in starts),
+        "runs_with_notes": sum("\n- [" in (e.preamble or "") for e in starts),
+        "notes_saved": sum(e.action == "added" for e in changes),
+        "notes_updated": sum(e.action == "updated" for e in changes),
+        "notes_deleted": sum(e.action == "deleted" for e in changes),
+        "volatile_saved": sum(e.action == "added" and e.note.volatile for e in changes),
+    }
+
+
 def to_trace(task: Task, ws: Path, events: list[Event]) -> list[dict[str, Any]]:
     """Events -> the role-based transcript format eval viewers render."""
     turns: list[dict[str, Any]] = [
@@ -647,6 +662,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 "tool_calls": len(tools),
                 "tool_errors": sum(e.is_error for e in tools),
                 "plan": plan_metrics(events),
+                "memory": memory_metrics(events) if settings.memory else None,
                 "latency_s": round(sum(e.latency_ms for e in llm) / 1000, 2),
                 "wall_s": round(wall_s, 2),
                 "attempts": attempt,
@@ -806,6 +822,16 @@ def summarize(variant_dir: Path) -> str:
     if out_of_steps := [r for r in ok if r.get("run_status") == "max_steps"]:
         tasks = ", ".join(sorted({r["prompt_id"] for r in out_of_steps}))
         lines.append(f"- ended at max_steps: {len(out_of_steps)} trial(s) ({tasks})")
+    if remembered := [r for r in ok if r.get("memory")]:
+        m = [r["memory"] for r in remembered]
+        multi = [r for r in remembered if len(r.get("runs", [])) > 1]
+        lines.append(
+            f"- memory: notes saved in {sum(x['notes_saved'] > 0 for x in m)}/{len(m)} trials "
+            f"({sum(x['notes_saved'] for x in m)} notes, "
+            f"{sum(x['volatile_saved'] for x in m)} volatile) · runs that opened with notes: "
+            f"{sum(x['runs_with_notes'] for x in m)} · multi-run trials passed: "
+            f"{sum(int(r['grade']['passed']) for r in multi)}/{len(multi)}"
+        )
     if planned := [r for r in ok if r.get("plan") is not None]:
         lines.append(_planning_line(planned))
     if leaks := [r for r in ok if r["meta"].get("leak_suspect")]:

@@ -2,8 +2,9 @@
 
 Streams SSE with realistic timing (~0.8s to first token, then ~30ms per word). The
 scripted run exercises planning (S3): it writes a plan and starts task 1 in one turn
-(parallel tool calls), runs `sleep 1; python3 --version`, stops early with task 2
-still open, gets the loop's reminder, finishes the plan, then answers.
+(parallel tool calls), runs `sleep 1; python3 --version` and saves a note about it (S4),
+stops early with task 2 still open, gets the loop's reminder, finishes the plan, answers.
+A later run in the same session gets the final answer straight away.
 
 Stateless: the reply is picked by how many assistant turns the request already holds,
 so any number of runs can use one server. FAKE_API_FAST=1 drops the delays (tests).
@@ -24,7 +25,9 @@ REPLIES = [
     ("I'll plan this first.", [tool(1, "task_create", tasks=[{"title": "Check the Python version"},
                                                              {"title": "Report it", "blocked_by": [1]}]),
                                tool(2, "task_update", updates=[{"id": 1, "status": "in_progress"}])], "tool_use"),
-    ("Checking.", [tool(3, "bash", command="sleep 1; python3 --version")], "tool_use"),
+    ("Checking.", [tool(3, "bash", command="sleep 1; python3 --version"),
+                   tool(6, "note_save", text="python3 is on PATH here", source="python3 --version")],
+     "tool_use"),
     ("", [tool(4, "task_update", updates=[{"id": 1, "status": "completed"}])], "tool_use"),
     ("Python 3 is installed.", [], "end_turn"),  # task 2 still open: expect a reminder
     ("", [tool(5, "task_update", updates=[{"id": 2, "status": "completed"}])], "tool_use"),

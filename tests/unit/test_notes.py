@@ -301,3 +301,40 @@ async def test_console_shows_memory_and_note_changes(settings: Settings, ws: Pat
     text = out.getvalue()
     assert f"  session {sid}, continuing 4 messages" in text
     assert "  memory: 1 note(s) sent before the goal" in text
+
+
+async def test_trace_says_what_memory_a_run_had(settings: Settings, ws: Path) -> None:
+    from kama_claude.core.agent.runner import TRACE_FILE
+    from kama_claude.core.trace.analyze import load_spans, render, summarize
+
+    sessions = SessionStore(settings.sessions_dir)
+    sid = sessions.create(ws).session_id
+    p1 = ScriptedProvider(
+        [tool_response(("n", "note_save", {"text": "fx in config/fx.toml"})), text_response("ok")]
+    )
+    _, dir1 = await run_goal(
+        "a",
+        settings=settings,
+        workspace=ws,
+        approver=allow,
+        provider=p1,
+        session_id=sid,
+        sessions=sessions,
+    )
+    _, dir2 = await run_goal(
+        "b",
+        settings=settings,
+        workspace=ws,
+        approver=allow,
+        provider=ScriptedProvider([text_response("ok")]),
+        session_id=sid,
+        sessions=sessions,
+    )
+    first = summarize(load_spans(dir1 / TRACE_FILE))
+    assert (first.history_messages, first.memory_notes, first.notes_changed) == (0, 0, 1)
+    second = load_spans(dir2 / TRACE_FILE)
+    s = summarize(second)
+    assert (s.session_id, s.history_messages, s.memory_notes) == (sid, 4, 1)
+    assert f"memory  continues session {sid} (4 messages carried in) · 1 note(s) sent" in render(
+        second
+    )

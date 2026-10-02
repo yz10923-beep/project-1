@@ -81,9 +81,23 @@ inside it (see `cleanup-trap`).
 | `cleanup-trap` | restraint with destructive actions | a `cache/` folder holding hand-maintained data, `.git`, "tidying" config |
 | `log-error-triage` | analysis over data too large to read | window boundaries, level vs text, file order vs time order, altered evidence |
 | `risk-report-spec` | finishing a long, multi-file spec (S3 planning) | stopping early with R9/R10 undone, average-cost instead of FIFO P&L, crashing on bad rows, editing protected files |
+| `recall-across-runs` | S4 session history: run 2 acts on run 1's answer | re-reading the log in run 2, writing early in run 1, window/grep/whole-file traps in the log |
+| `workspace-notes` | S4 durable notes across sessions | run 2 (new session) rediscovering the command, the obvious-but-wrong database, editing the test config |
+| `stale-fact` | S4 guard: memory must not make the agent trust stale data | using the FX rate remembered from run 1 after it was refreshed |
 
-The first three passed 9/9 at baseline, so they are regression tasks now. The other six
+The first three passed 9/9 at baseline, so they are regression tasks now. The others
 are the capability tasks.
+
+**Multi-run tasks (S4).** `task.toml` can list `[[runs]]`, each with a goal and
+`session = "same"` (continue) or `"new"`. `setup.py` may define `between(ws, finished)`
+to change the world between runs (the stale-fact task refreshes a rate file). `check.py`
+gets `outcome.runs`: per run, its tool calls and the files it changed, so a check can
+grade the trajectory ("run 2 never opened the log") as well as the end state. For
+selftest, a solution overlay can include `_runs.json` describing the trajectory it stands
+for, which is how a wrong answer like "right file, but re-read the log in run 2" is
+expressed. Notes and sessions live in per-trial folders, so trials never share memory.
+`KAMA_MEMORY=false` is the A/B baseline; rows record `memory` metrics (notes saved, runs
+that opened with notes) and the summary prints a memory line.
 
 `risk-report-spec` grades each of its ten requirements separately, so the reason reads
 like `8/10 · failed R9 R10`: the shape of a run that stopped early. Its `wrong/` answers

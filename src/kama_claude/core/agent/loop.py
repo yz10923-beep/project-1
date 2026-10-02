@@ -131,6 +131,7 @@ class _RunState:
     plan_only_steps: int = 0
     budget_credit: int = 0  # plan-only steps not counted against max_steps
     last_step_plan_only: bool = False
+    notes_changed: int = 0
 
     @property
     def budget_used(self) -> int:
@@ -216,6 +217,13 @@ class AgentLoop:
             finally:
                 self._close_task_spans()
             span.set(status=result.status, steps=result.steps, **result.usage.model_dump())
+            span.set(
+                session_id=session_id,
+                history_messages=len(history or []),
+                memory_notes=(preamble or "").count("\n- ["),
+                memory_chars=len(preamble or ""),
+                notes_changed=self._state.notes_changed,
+            )
             if self._planning:
                 counts = self._ctx.plan.counts()
                 span.set(
@@ -508,6 +516,7 @@ class AgentLoop:
             )
         if call.name in NOTE_TOOL_NAMES and self._ctx.notes is not None:
             for change in self._ctx.notes.drain():
+                self._state.notes_changed += 1
                 await self._sink.emit(
                     NoteUpdatedEvent(
                         **self._meta(run_id),

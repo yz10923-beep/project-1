@@ -11,7 +11,7 @@ the demo command works, not "the code is written".
 | **S2** ✅ | Move the runner into the daemon; clients subscribe to an event stream over IPC | Two clients watch the same run live; client crash doesn't kill the run | Pub/sub, backpressure, cancellation in asyncio |
 | **Trace** ✅ | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
 | **S3** ✅ | Task tools (create/update/get/list, dependencies) so the model plans; the user can steer the plan; TUI | A multi-step goal shows a visible plan being executed, in the CLI and the TUI; the eval A/B says whether planning helps | Planning as tools, not prompts; a real frontend over the protocol |
-| **S4** | Sessions: multiple runs share a thread; notes as durable memory | Run 2 uses a fact learned in run 1 without re-reading it | Memory tiers: working context vs. durable notes |
+| **S4** ✅ | Sessions: multiple runs share a thread (history replayed from events, interrupted runs repaired); durable notes (workspace/session scope, provenance, volatile values); `kama chat`, notes in CLI/TUI | Run 2 uses a fact learned in run 1 without re-reading it; memory never makes the agent trust stale data (eval: 3 multi-run tasks) | Memory tiers: working context vs. session history vs. durable notes |
 | **S5** | Tool safety: param validation, permission policy + approval flow, failure classification, retry | A denied `bash rm` is blocked and the model recovers; transient errors retry, permanent don't | Failure handling for agents |
 | **S6** | Context governance: token budget, tool_result truncation, compaction | A long session stays under budget with measured quality loss | Context engineering, token accounting |
 | **S7** | Skills, subagents, MCP client | An MCP server's tools appear in the registry and get called | Extension boundaries |
@@ -208,7 +208,99 @@ Read, in this order: pass rate against the noise floor, "ended at max_steps", th
 planning line (plans made, open at end, passed after reminder, plan-only steps and how
 many were credited), `risk-report-spec`'s per-requirement reasons, then cost per trial.
 
+## S4 notes
+
+Built (full version):
+- **Three memory tiers.** Working context (one run's messages); session history (earlier
+  runs of the same conversation, replayed); durable notes (facts saved for later runs,
+  workspace scope across sessions or session scope).
+- **Sessions** (`core/session.py`): a JSON file listing a session's runs. The history is
+  rebuilt from each run's `events.jsonl` (`core/agent/history.py: replay`), never stored
+  twice. `run.start` takes `session_id` / `new_session`; one run per session at a time;
+  sessions survive a daemon restart.
+- **Notes** (`core/notes.py`, `note_save/update/delete/list`): source, volatile flag,
+  author, run; bounded per scope; `note.updated` events.
+- **The memory block**: at run start, notes (and, for a continued session, when the last
+  run ended and that the workspace may have changed since) go before the goal in the
+  first user message.
+- **Clients**: `kama chat` (a conversation, `/notes`, `/note`, `/new`), `kama session`,
+  `kama notes`, `run --session/--new-session`; the TUI continues conversations (ctrl+n
+  starts a new one), shows a live memory panel and manages notes (ctrl+l).
+- **Observability**: `run.started` records session, history size, repairs and the memory
+  block; `kama trace` gets a memory line; eval rows get memory metrics.
+- **Eval, written first**: multi-run tasks in the harness (`[[runs]]`, `between()` hook,
+  per-run records so checks can grade the trajectory), and three tasks:
+  `recall-across-runs` (session history), `workspace-notes` (notes across sessions),
+  `stale-fact` (a guard: memory must not make the agent use a rate that has changed).
+
+Design choices worth defending:
+- **History is rebuilt from events, not stored as messages.** One source of truth: the
+  loop builds its messages with the same helpers `replay` uses, and a test checks that
+  the rebuilt conversation equals what was sent. A second messages file (the reference's
+  choice) can disagree with the runs it summarizes.
+- **Interrupted runs are repaired on the way in.** A run cancelled mid-tool leaves
+  tool_use blocks without results (possibly some answered, some not); the API rejects
+  that. The next run adds is_error results ("the previous run ended before this tool
+  call finished") and records `repaired=N` in its run.started. A trailing user turn
+  (max_steps after tools, an API error) is joined, never doubled. `conversation_problems()`
+  checks the API's structural rules locally and is used on every rebuilt history in tests.
+- **Notes go in the first user message, not the system prompt.** The system prompt stays
+  byte-stable (cache prefix), and a continued session's earlier turns are reused as a
+  cache prefix too. The reference injects notes into the system prompt, which re-caches
+  everything whenever a note changes.
+- **Workspace and session scope.** Project facts (how to run the tests) belong to the
+  workspace and must survive a new conversation; conversation details shouldn't leak
+  into the next one (tested both ways).
+- **Memory is the past.** Notes carry a source and age; volatile ones are flagged for
+  re-checking; a continued session is told how long ago it last ran. Memory poisoning (a
+  file's text saved as a note and replayed into every later run) is mitigated by framing
+  notes as the agent's own observations with their source, not as instructions, and by
+  letting the user list and delete them.
+- **KAMA_MEMORY=false is the S3 agent, byte for byte** (no history, no notes, same prompt),
+  so the memory A/B changes one thing.
+
+Bugs found by the tests (and one by looking at the machine):
+- Tests were writing into the real `~/.kama` (a `runs/_daemon` folder left over from an
+  earlier stage). Every test now gets its own HOME.
+- My expectation of *where* the repair happens was wrong: `history()` is what happened
+  (orphans included); the run that continues repairs it and says so. That is the better
+  design, so the test changed, not the code.
+- Thinking through cancellation exposed partially answered tool turns (one tool finished,
+  the next was cancelled): the repair originally only handled a bare tool_use turn.
+- The eval harness marked memory-off trials as having memory metrics (they still use
+  sessions to group runs); it now follows the setting, not the events.
+- ruff caught an assert that could never fail (`assert "a" "b" in x` without parentheses
+  asserted only the string); mypy caught a `list` method shadowing the builtin in
+  annotations; two traps in the recall task produced the same wrong answer (fixed so each
+  trap is distinguishable).
+
+### The S4 experiment (VM; costs money)
+
+```bash
+uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s4-mem \
+  --tasks recall-across-runs,workspace-notes,stale-fact
+KAMA_MEMORY=false uv run python -m evals.run_evals run --reps 3 --variant s4-nomem \
+  --tasks recall-across-runs,workspace-notes,stale-fact
+uv run python -m evals.run_evals run --reps 3 --variant s4-full     # regression: all 12
+```
+
+Predictions, written before the run so the result can prove them wrong:
+`recall-across-runs` passes with memory and fails without (run 2 has to re-read or ask);
+`workspace-notes` fails without memory by construction, and with memory passes only if
+the model chose to save the command in run 1 (the real question); `stale-fact` passes in
+both arms, and a memory-arm failure there is the most important result of the stage.
+
 ## Interview talking points
+
+### S4
+- "How does your agent remember?" Three tiers, each with a different lifetime and
+  failure mode; history rebuilt from an event log (one source of truth); notes with
+  provenance and a volatile flag; memory framed as observations, not instructions.
+- The stale-data guard: in finance a remembered price is a liability. The eval has a task
+  whose only purpose is to catch memory making the agent wrong.
+- Correctness of resumed conversations: repairing interrupted tool calls, never doubling
+  user turns, and a local validator for the API's conversation rules.
+
 
 ### S3
 - "How does your agent plan?" Tools, not prompts: a task DAG the runtime can check,
