@@ -129,8 +129,11 @@ async def _ask_user(
     name: str, tool_input: dict[str, object], can_remember: bool = False
 ) -> ApprovalDecision:
     choices = "[y/a/N]" if can_remember else "[y/N]"
-    answer = await asyncio.to_thread(input, f"  ? allow {_describe(name, tool_input)} {choices} ")
-    decision = parse_answer(answer)
+    answer = await asyncio.to_thread(
+        read_line, f"  ? allow {_describe(name, tool_input)} {choices} "
+    )
+    # a stray byte in a reason must not crash the answer: show it as U+FFFD
+    decision = parse_answer(bad_bytes(answer) or answer)
     if decision.remember and not can_remember:
         return ApprovalDecision(True, "user")
     return decision
@@ -360,6 +363,31 @@ class UsageError(Exception):
     """Bad arguments (exit 2), as opposed to the daemon being unreachable (exit 3)."""
 
 
+BAD_BYTES_HINT = (
+    "usually a half-deleted non-ASCII character (an em dash, a curly quote, a Chinese-IME "
+    "punctuation mark): the terminal erased it one byte at a time. Retype the line. "
+    "To fix the terminal: `export LANG=C.UTF-8` (e.g. in ~/.bashrc) and `stty iutf8`"
+)
+
+
+def bad_bytes(text: str) -> str | None:
+    """None if `text` is clean. Otherwise it held bytes that aren't valid UTF-8, which
+    Python's stdin and argv hand over as lone surrogates (\udce2 for a stray 0xE2), and
+    no JSON or API request can carry those: return it with them shown as U+FFFD."""
+    if not any(0xD800 <= ord(c) <= 0xDFFF for c in text):
+        return None
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
+def read_line(prompt: str) -> str:
+    """input() with line editing (readline: arrow keys, history, Backspace that removes a
+    whole character in a UTF-8 terminal) when talking to a person."""
+    if sys.stdin.isatty():
+        with contextlib.suppress(ImportError):
+            import readline  # noqa: F401  (importing it is what enables it for input())
+    return input(prompt)
+
+
 def _workspace(raw: str) -> Path:
     ws = Path(raw).resolve()
     if not ws.is_dir():
@@ -390,10 +418,14 @@ async def _chat(settings: Settings, args: argparse.Namespace) -> int:
         answer = make_answerer(args.yes, deny_if_not_tty=True)
         while True:
             try:
-                line = (await asyncio.to_thread(input, "\nyou> ")).strip()
+                line = (await asyncio.to_thread(read_line, "\nyou> ")).strip()
             except EOFError:
                 break
             if not line:
+                continue
+            if (shown := bad_bytes(line)) is not None:
+                print(f"that line has bytes that aren't valid UTF-8 (shown as �): {shown!r}")
+                print(f"  {BAD_BYTES_HINT}")
                 continue
             if line in ("/quit", "/exit"):
                 break
@@ -739,6 +771,14 @@ def main(argv: list[str] | None = None) -> None:
     except ConfigError as e:
         print(f"kama: invalid configuration:\n{e}", file=sys.stderr)
         raise SystemExit(EXIT_USAGE) from e
+    for field in ("goal", "text", "title"):
+        if (shown := bad_bytes(getattr(args, field, None) or "")) is not None:
+            print(
+                f"kama: the {field} has bytes that aren't valid UTF-8: {shown!r}\n"
+                f"hint: {BAD_BYTES_HINT}",
+                file=sys.stderr,
+            )
+            raise SystemExit(EXIT_USAGE)
     if args.command == "run":
         args.workspace = Path(args.workspace).resolve()
         if not args.workspace.is_dir():

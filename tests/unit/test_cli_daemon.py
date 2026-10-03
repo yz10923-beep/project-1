@@ -313,3 +313,39 @@ def test_kama_policy_check_explains_and_sets_the_exit_code(
     args = argparse.Namespace(policy_command="show", workspace=str(ws), mode=None)
     assert cli._policy(settings, args) == cli.EXIT_OK
     assert "ignored 1 allow rule" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- input that isn't UTF-8
+
+# What Python hands over for a line holding a stray 0xE2 byte (the first byte of "—"):
+# a lone surrogate, which no JSON request can carry. Seen on a VM after Backspace over
+# a Chinese-IME dash in a terminal that erases one byte at a time.
+STRAY = (b"write that to a file named data\xe2_discription.md").decode("utf-8", "surrogateescape")
+
+
+def test_bad_bytes_are_found_and_shown() -> None:
+    assert cli.bad_bytes("plain — ascii and ünïcode") is None
+    assert cli.bad_bytes(STRAY) == "write that to a file named data�_discription.md"
+
+
+async def test_chat_explains_a_line_with_stray_bytes_instead_of_crashing(
+    memory_core: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, settings, ws, providers = memory_core
+    lines = iter([STRAY, "write that to a file named data_description.md", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(lines))
+    args = cli.build_parser().parse_args(["chat", "-w", str(ws), "-y"])
+    assert await cli._chat(settings, args) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "that line has bytes that aren't valid UTF-8 (shown as �)" in out
+    assert "export LANG=C.UTF-8" in out
+    # only the retyped line became a run
+    [p] = providers
+    assert p.requests[0].messages[-1]["content"].endswith("data_description.md")
+
+
+def test_a_goal_with_stray_bytes_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", STRAY])
+    assert exc.value.code == cli.EXIT_USAGE
+    assert "the goal has bytes that aren't valid UTF-8" in capsys.readouterr().err
