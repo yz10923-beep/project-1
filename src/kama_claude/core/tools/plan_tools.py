@@ -56,7 +56,7 @@ class TaskCreate(Tool[TaskCreateParams]):
         try:
             ctx.plan.add([NewTask(**t.model_dump()) for t in params.tasks])
         except PlanError as e:
-            raise ToolError(str(e)) from e
+            raise ToolError(str(e), "rejected") from e
         return ToolResult(ctx.plan.render())
 
 
@@ -96,7 +96,7 @@ class TaskUpdate(Tool[TaskUpdateParams]):
         try:
             ctx.plan.update([TaskChange(**u.model_dump()) for u in params.updates])
         except PlanError as e:
-            raise ToolError(str(e)) from e
+            raise ToolError(str(e), "rejected") from e
         return ToolResult(ctx.plan.render())
 
 
@@ -113,7 +113,7 @@ class TaskGet(Tool[TaskGetParams]):
         try:
             task = ctx.plan.get(params.id)
         except PlanError as e:
-            raise ToolError(str(e)) from e
+            raise ToolError(str(e), "rejected") from e
         return ToolResult(render_details(task, ctx.plan.tasks))
 
 

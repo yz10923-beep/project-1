@@ -34,6 +34,7 @@ from kama_claude.core.agent.runner import (
     prepare_run,
     run_tracer,
     runs_root,
+    sandbox_for,
 )
 from kama_claude.core.agent.sinks import JsonlEventWriter
 from kama_claude.core.bus.commands import RunInfo, StreamEnd
@@ -45,9 +46,12 @@ from kama_claude.core.bus.events import (
     is_durable,
 )
 from kama_claude.core.config import Settings
+from kama_claude.core.llm.anthropic_provider import make_client
 from kama_claude.core.llm.types import LLMProvider, ToolCall
 from kama_claude.core.notes import Note, NoteError, NoteScope, NoteStore
 from kama_claude.core.plan import NewTask, PlanError, PlanTask, TaskChange
+from kama_claude.core.policy.engine import Mode, Rule
+from kama_claude.core.sandbox import Sandbox
 from kama_claude.core.session import SessionInfo, SessionStore, UnknownSession
 from kama_claude.core.trace.tracer import Tracer
 
@@ -132,7 +136,7 @@ class RunHandle:
     status: str = "running"
     history: list[Event] = field(default_factory=list)
     subscribers: set[_Subscriber] = field(default_factory=set)
-    pending: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
+    pending: dict[str, asyncio.Future[ApprovalDecision]] = field(default_factory=dict)
     task: asyncio.Task[RunResult] | None = None
     tracer: Tracer = field(default_factory=Tracer.noop)
     plan: list[PlanTask] = field(default_factory=list)  # latest plan.updated snapshot
@@ -186,16 +190,25 @@ class RunManager:
         self.sessions = SessionStore(settings.sessions_dir)
         self.notes = note_store(settings)
         self._active: dict[str, str] = {}  # session_id -> its run in progress
+        self._sandbox: Sandbox | None = None
+
+    @property
+    def sandbox(self) -> Sandbox:
+        if self._sandbox is None:
+            self._sandbox = sandbox_for(self._settings)
+        return self._sandbox
 
     def warm_up(self) -> None:
-        """Build the default SDK client at daemon start, not during the first run.start."""
+        """Build the default SDK client and probe the sandbox at daemon start, not during
+        the first run.start. An explicit sandbox that doesn't work stops the daemon here."""
         if self._provider_factory == self._shared_client_provider:
             self._shared_client_provider(self._settings)
+        logger.info("sandbox for bash: %s", self.sandbox.describe())
 
     def _shared_client_provider(self, settings: Settings) -> LLMProvider:
         key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
         if key not in self._clients:
-            self._clients[key] = anthropic.AsyncAnthropic(api_key=key)
+            self._clients[key] = make_client(key)
         return make_provider(settings, client=self._clients[key])
 
     async def start(
@@ -208,6 +221,7 @@ class RunManager:
         max_steps: int | None = None,
         session_id: str | None = None,
         new_session: bool = False,
+        mode: Mode | None = None,
     ) -> RunHandle:
         """Start a run (in a session: continuing its history, at most one run at a time).
         Raises SessionError if the session can't take it."""
@@ -242,15 +256,32 @@ class RunManager:
         async def approve(call: ToolCall) -> ApprovalDecision:
             return await self._await_approval(handle, call)
 
-        loop = build_loop(
-            settings,
-            workspace=workspace,
-            sink=_RunSink(handle, writer),
-            approver=approve,
-            provider=self._provider_factory(settings),
-            tracer=handle.tracer,
-            notes=self.notes,
-        )
+        session_rules: list[Rule] = []
+        if session_id is not None:
+            session_rules = await asyncio.to_thread(self.sessions.rules, session_id)
+
+        async def remember(rules: tuple[Rule, ...]) -> None:
+            if session_id is not None:
+                await asyncio.to_thread(self.sessions.add_rules, session_id, list(rules))
+
+        try:
+            loop = build_loop(
+                settings,
+                workspace=workspace,
+                sink=_RunSink(handle, writer),
+                approver=approve,
+                provider=self._provider_factory(settings),
+                tracer=handle.tracer,
+                notes=self.notes,
+                mode=mode or ("auto" if auto_approve else None),
+                session_rules=session_rules,
+                on_remember=remember,
+            )
+        except BaseException:
+            writer.close()
+            if session_id is not None:
+                self._active.pop(session_id, None)
+            raise
 
         async def drive() -> RunResult:
             try:
@@ -349,23 +380,30 @@ class RunManager:
     async def _await_approval(self, handle: RunHandle, call: ToolCall) -> ApprovalDecision:
         if handle.auto_approve:
             return ApprovalDecision(True, "auto")
-        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        fut: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
         handle.pending[call.id] = fut
         try:
-            approved = await asyncio.wait_for(fut, timeout=self._settings.approval_timeout_s)
-            return ApprovalDecision(approved, "user")
+            return await asyncio.wait_for(fut, timeout=self._settings.approval_timeout_s)
         except TimeoutError:
             return ApprovalDecision(False, "timeout")
         finally:
             handle.pending.pop(call.id, None)
 
-    def respond(self, run_id: str, tool_use_id: str, approve: bool) -> bool:
+    def respond(
+        self,
+        run_id: str,
+        tool_use_id: str,
+        approve: bool,
+        *,
+        reason: str = "",
+        remember: bool = False,
+    ) -> bool:
         """Answer a pending approval. False if unknown, already answered, or expired."""
         handle = self._get(run_id)
         fut = handle.pending.get(tool_use_id)
         if fut is None or fut.done():
             return False
-        fut.set_result(approve)
+        fut.set_result(ApprovalDecision(approve, "user", reason=reason, remember=remember))
         return True
 
     def cancel(self, run_id: str) -> bool:

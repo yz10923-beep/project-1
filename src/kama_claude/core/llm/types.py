@@ -75,12 +75,43 @@ class LLMResponse(BaseModel):
         ]
 
 
-class LLMError(Exception):
-    """Provider call failed after the SDK's own retries. `retryable`: a later try may work."""
+LLMErrorKind = Literal[
+    "rate_limit",  # 429: slow down, honour retry-after
+    "overloaded",  # 529 / overloaded_error: the API is busy
+    "server",  # other 5xx
+    "connection",  # network failure or timeout before a response
+    "stream_interrupted",  # the response started streaming, then broke
+    "invalid_request",  # 400, 422: fix the request; retrying repeats the error
+    "auth",  # 401
+    "permission",  # 403
+    "not_found",  # 404: e.g. an unknown model
+    "too_large",  # 413: the request is over the size limit
+    "billing",  # 402
+    "unknown",
+]
+RETRYABLE_KINDS: frozenset[LLMErrorKind] = frozenset(
+    {"rate_limit", "overloaded", "server", "connection", "stream_interrupted"}
+)
 
-    def __init__(self, message: str, *, retryable: bool) -> None:
+
+class LLMError(Exception):
+    """A provider call failed. `retryable`: the same request may work later (the call has
+    no side effects, so retrying it is safe, unlike a tool call)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        kind: LLMErrorKind = "unknown",
+        status: int | None = None,
+        retry_after_s: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.kind: LLMErrorKind = kind
+        self.status = status
+        self.retry_after_s = retry_after_s
 
 
 class LLMProvider(Protocol):

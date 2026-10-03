@@ -10,14 +10,17 @@ from kama_claude.core.bus.events import (
     Event,
     LLMDeltaEvent,
     LLMResponseEvent,
+    LLMRetryEvent,
     NoteUpdatedEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
     PlanUpdatedEvent,
     RunFinishedEvent,
     RunStartedEvent,
+    ToolApprovalRequestedEvent,
     ToolApprovalResolvedEvent,
     ToolFinishedEvent,
+    ToolPolicyEvent,
     ToolStartedEvent,
     is_durable,
 )
@@ -94,6 +97,12 @@ class ConsolePrinter:
                 if event.preamble:
                     notes = event.preamble.count("\n- [")
                     self._p(f"  memory: {notes} note(s) sent before the goal")
+                if event.policy:
+                    self._p(
+                        f"  policy: mode={event.policy['mode']} · sandbox={event.policy['sandbox']}"
+                    )
+                    for w in event.policy.get("warnings", []):
+                        self._p(f"  ! {w}")
             case NoteUpdatedEvent():
                 why = f" ({event.reason})" if event.reason else ""
                 vol = " [volatile]" if event.note.volatile else ""
@@ -105,8 +114,21 @@ class ConsolePrinter:
                 pass  # the note line says what changed
             case ToolFinishedEvent() if event.name in NOTE_TOOL_NAMES and not event.is_error:
                 pass
+            case ToolApprovalRequestedEvent() if event.reason:
+                self._p(f"  ? needs approval ({event.risk} risk): {event.reason}")
+            case ToolApprovalResolvedEvent() if event.remembered:
+                self._p(f"  ✓ always allowing in this session: {', '.join(event.remembered)}")
             case ToolApprovalResolvedEvent() if event.by not in ("user", "auto"):
                 self._p(f"  ! approval {event.by}: {'approved' if event.approved else 'denied'}")
+            case ToolPolicyEvent(action="deny"):
+                again = " (again)" if event.repeated else ""
+                self._p(f"  ✋ blocked{again} by {event.rule}: {event.reason}")
+            case LLMRetryEvent():
+                self._p(
+                    f"  ↻ model call failed ({event.kind}); retrying in {event.wait_s:.1f}s "
+                    f"(attempt {event.attempt + 1})"
+                )
+                self._streamed_steps.discard(event.step)  # its streamed text is void
             case LLMResponseEvent():
                 u = event.usage
                 self._p(
@@ -152,6 +174,14 @@ class ConsolePrinter:
                 )
                 if self._plan:
                     self._p(_plan_summary(list(self._plan.values())))
+                safety = [
+                    f"{event.policy_denials} blocked" if event.policy_denials else "",
+                    f"{event.repeat_denials} repeated" if event.repeat_denials else "",
+                    f"{event.approvals_asked} asked" if event.approvals_asked else "",
+                    f"{event.llm_retries} model retries" if event.llm_retries else "",
+                ]
+                if any(safety):
+                    self._p("safety: " + " · ".join(x for x in safety if x))
                 if event.error:
                     self._p(f"error: {event.error}")
                 if event.final_text and not self._streamed_steps:

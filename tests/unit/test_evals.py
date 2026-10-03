@@ -35,7 +35,8 @@ def solve_script() -> list[LLMResponse | LLMError]:
 
 def cfg_for(tmp_path: Path, factory: Any, **kw: Any) -> RunConfig:
     return RunConfig(
-        settings=Settings(model="fake-model"),
+        # no in-loop retries: these tests drive the harness's own trial retries
+        settings=Settings(model="fake-model", llm_max_retries=0),
         reps=kw.pop("reps", 1),
         provider_factory=factory,
         results_dir=tmp_path / "results",

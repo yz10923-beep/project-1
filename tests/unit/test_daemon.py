@@ -412,7 +412,7 @@ async def test_plan_progress_is_visible_to_late_clients_and_run_list(
                 ),
                 tool_response(
                     ("u2", "task_update", {"updates": [{"id": 1, "status": "completed"}]}),
-                    ("b", "bash", {"command": "echo hi"}),  # waits for approval
+                    ("b", "bash", {"command": "echo hi > hi.txt"}),  # waits for approval
                 ),
                 tool_response(
                     ("u3", "task_update", {"updates": [{"id": 2, "status": "completed"}]})

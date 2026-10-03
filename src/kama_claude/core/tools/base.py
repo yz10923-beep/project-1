@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from kama_claude.core.notes import NoteBook
 from kama_claude.core.plan import Plan
+from kama_claude.core.sandbox import Sandbox
 
 
 @dataclass(frozen=True)
@@ -18,16 +19,26 @@ class ToolContext:
     plan: Plan = field(default_factory=Plan)
     # The run's view of durable notes (S4); None when memory is off.
     notes: NoteBook | None = None
+    # S5: where bash runs, and whether this call may use the network (the policy decides
+    # per call). No sandbox = run directly, as before S5.
+    sandbox: Sandbox | None = None
+    network: bool = True
+    env_keep: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
 class ToolResult:
     content: str
     is_error: bool = False
+    error_kind: str | None = None  # set when is_error: what kind of failure (S5)
 
 
 class ToolError(Exception):
     """Expected failure the model should see and can react to (bad path, missing file, ...)."""
+
+    def __init__(self, message: str, kind: str = "failed") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class Tool[P: BaseModel](ABC):
@@ -55,5 +66,5 @@ def resolve_in_workspace(workspace: Path, path: str) -> Path:
     root = workspace.resolve()
     target = (root / path).resolve()
     if not target.is_relative_to(root):
-        raise ToolError(f"path escapes the workspace: {path}")
+        raise ToolError(f"path escapes the workspace: {path}", "outside_workspace")
     return target

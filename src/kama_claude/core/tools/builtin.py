@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kama_claude.core.sandbox import Sandbox, scrubbed_env
 from kama_claude.core.tools.base import (
     Tool,
     ToolContext,
@@ -44,11 +45,13 @@ class ReadFile(Tool[ReadFileParams]):
     def _run_sync(self, params: ReadFileParams, ctx: ToolContext) -> ToolResult:
         path = resolve_in_workspace(ctx.workspace, params.path)
         if not path.is_file():
-            raise ToolError(f"not a file: {params.path}")
+            raise ToolError(
+                f"not a file: {params.path}", "not_found" if not path.exists() else "invalid_target"
+            )
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError as e:
-            raise ToolError(f"not a UTF-8 text file: {params.path}") from e
+            raise ToolError(f"not a UTF-8 text file: {params.path}", "invalid_target") from e
         start = params.offset - 1
         chunk = lines[start : start + params.limit]
         if not chunk:
@@ -75,7 +78,10 @@ class ListDir(Tool[ListDirParams]):
     def _run_sync(self, params: ListDirParams, ctx: ToolContext) -> ToolResult:
         path = resolve_in_workspace(ctx.workspace, params.path)
         if not path.is_dir():
-            raise ToolError(f"not a directory: {params.path}")
+            raise ToolError(
+                f"not a directory: {params.path}",
+                "not_found" if not path.exists() else "invalid_target",
+            )
         entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
         names = [e.name + ("/" if e.is_dir() else "") for e in entries[:_MAX_LIST_ENTRIES]]
         if len(entries) > _MAX_LIST_ENTRIES:
@@ -103,7 +109,7 @@ class WriteFile(Tool[WriteFileParams]):
     def _run_sync(self, params: WriteFileParams, ctx: ToolContext) -> ToolResult:
         path = resolve_in_workspace(ctx.workspace, params.path)
         if path.is_dir():
-            raise ToolError(f"is a directory: {params.path}")
+            raise ToolError(f"is a directory: {params.path}", "invalid_target")
         existed = path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(params.content, encoding="utf-8")
@@ -127,21 +133,29 @@ class Bash(Tool[BashParams]):
     requires_approval = True
 
     async def run(self, params: BashParams, ctx: ToolContext) -> ToolResult:
-        proc = await asyncio.create_subprocess_shell(
-            params.command,
+        sandbox = ctx.sandbox or Sandbox("none")
+        proc = await asyncio.create_subprocess_exec(
+            *sandbox.argv(params.command, ctx.workspace, network=ctx.network),
             cwd=ctx.workspace,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             # Own process group, so a timeout kills the command's children too.
             start_new_session=True,
+            # Credentials in the daemon's environment never reach the agent's commands.
+            env=scrubbed_env(ctx.env_keep),
         )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=params.timeout_s)
         except TimeoutError:
             _kill_group(proc)
             await proc.wait()
-            return ToolResult(f"Command timed out after {params.timeout_s}s and was killed.", True)
+            return ToolResult(
+                f"Command timed out after {params.timeout_s}s and was killed. Raise timeout_s "
+                "(max 600), make the command faster, or split it.",
+                True,
+                "timeout",
+            )
         except asyncio.CancelledError:
             _kill_group(proc)
             raise

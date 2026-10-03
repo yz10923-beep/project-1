@@ -49,6 +49,7 @@ def run_args(ws: Path, **kw: Any) -> argparse.Namespace:
         local=False,
         session=None,
         new_session=False,
+        mode=None,
     )
     return argparse.Namespace(**{**base, **kw})
 
@@ -264,3 +265,51 @@ async def test_bad_workspace_is_a_usage_error(memory_core: Any, tmp_path: Path) 
     args = cli.build_parser().parse_args(["notes", "list", "-w", str(tmp_path / "nope")])
     with pytest.raises(cli.UsageError):
         await cli._notes(settings, args)
+
+
+# ---------------------------------------------------------------- S5
+
+
+@pytest.mark.parametrize(
+    ("typed", "approved", "remember", "reason"),
+    [
+        ("y", True, False, ""),
+        ("yes", True, False, ""),
+        ("a", True, True, ""),
+        ("", False, False, ""),
+        ("n", False, False, ""),
+        ("n use git mv instead", False, False, "use git mv instead"),
+        ("no, the data is shared", False, False, "the data is shared"),
+        ("please don't touch prod", False, False, "please don't touch prod"),
+    ],
+)
+def test_approval_answers(typed: str, approved: bool, remember: bool, reason: str) -> None:
+    d = cli.parse_answer(typed)
+    assert (d.approved, d.remember, d.reason) == (approved, remember, reason)
+
+
+def test_kama_policy_check_explains_and_sets_the_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "proj"
+    (ws / ".git").mkdir(parents=True)
+    settings = cli.Settings(policy_file=tmp_path / "policy.toml")
+
+    def check(target: str, mode: str | None = None) -> int:
+        args = argparse.Namespace(
+            policy_command="check", workspace=str(ws), mode=mode, target=target, tool="bash"
+        )
+        return cli._policy(settings, args)
+
+    assert check("rm -rf .git") == cli.EXIT_FAILED
+    out = capsys.readouterr().out
+    assert out.startswith("DENY (forbidden, high risk) by builtin:protected-path")
+    assert "the model would read:" in out
+    assert check("python -m pytest") == cli.EXIT_OK
+    assert "'always' would allow: python -m pytest" in capsys.readouterr().out
+    assert check("curl https://x.io", mode="auto") == cli.EXIT_FAILED
+    (ws / ".kama").mkdir()
+    (ws / ".kama" / "policy.toml").write_text('[[rules]]\naction = "allow"\ncommand = "curl"\n')
+    args = argparse.Namespace(policy_command="show", workspace=str(ws), mode=None)
+    assert cli._policy(settings, args) == cli.EXIT_OK
+    assert "ignored 1 allow rule" in capsys.readouterr().out

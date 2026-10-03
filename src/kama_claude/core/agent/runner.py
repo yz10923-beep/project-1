@@ -3,6 +3,7 @@ harness (run_goal), and by the daemon's RunManager (build_loop)."""
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,12 +11,15 @@ from pathlib import Path
 
 import anthropic
 
-from kama_claude.core.agent.loop import AgentLoop, Approver, RunResult
+from kama_claude.core.agent.loop import AgentLoop, Approver, RememberRules, RunResult
 from kama_claude.core.agent.sinks import EventSink, FanoutSink, JsonlEventWriter
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.anthropic_provider import AnthropicProvider
+from kama_claude.core.llm.retry import RetryPolicy
 from kama_claude.core.llm.types import LLMProvider, Message
 from kama_claude.core.notes import NoteStore, memory_preamble
+from kama_claude.core.policy.engine import Mode, Policy, Rule
+from kama_claude.core.sandbox import Sandbox, detect
 from kama_claude.core.session import SessionStore
 from kama_claude.core.tools.builtin import builtin_tools
 from kama_claude.core.tools.note_tools import note_tools
@@ -88,6 +92,50 @@ def note_store(settings: Settings) -> NoteStore | None:
     return NoteStore(settings.memory_dir) if settings.memory else None
 
 
+def daemon_paths(settings: Settings) -> tuple[Path, ...]:
+    """The daemon's own files and dirs, which no tool call may read or change."""
+    return tuple(
+        p.expanduser()
+        for p in (
+            settings.runs_dir,
+            settings.sessions_dir,
+            settings.memory_dir,
+            settings.token_file,
+            settings.policy_file,
+        )
+        if p.expanduser().is_absolute()
+    )
+
+
+def load_policy(
+    settings: Settings,
+    workspace: Path,
+    *,
+    mode: Mode | None,
+    session_rules: list[Rule] | None = None,
+) -> Policy | None:
+    """The run's policy, or None with KAMA_POLICY=false. Raises PolicyFileError."""
+    if not settings.policy:
+        return None
+    return Policy.load(
+        workspace,
+        mode=mode,
+        user_file=settings.policy_file,
+        kama_paths=daemon_paths(settings),
+        session_rules=session_rules,
+    )
+
+
+def sandbox_for(settings: Settings) -> Sandbox:
+    """Probed once per process (cached). Raises SandboxUnavailable for an explicit backend
+    that doesn't work here."""
+    return detect(settings.sandbox)
+
+
+def retry_policy(settings: Settings) -> RetryPolicy:
+    return RetryPolicy(max_retries=settings.llm_max_retries, budget_s=settings.llm_retry_budget_s)
+
+
 def build_loop(
     settings: Settings,
     *,
@@ -97,10 +145,14 @@ def build_loop(
     provider: LLMProvider | None = None,
     tracer: Tracer | None = None,
     notes: NoteStore | None = None,
+    mode: Mode | None = None,
+    session_rules: list[Rule] | None = None,
+    on_remember: RememberRules | None = None,
 ) -> AgentLoop:
     tools = builtin_tools()
     tools += plan_tools() if settings.planning else []
     tools += note_tools() if settings.memory else []
+    keep = frozenset(k.strip() for k in settings.bash_env_keep.split(",") if k.strip())
     return AgentLoop(
         provider=provider or make_provider(settings),
         registry=ToolRegistry(tools),
@@ -110,6 +162,11 @@ def build_loop(
         max_steps=settings.max_steps,
         tracer=tracer,
         notes=notes if settings.memory else None,
+        policy=load_policy(settings, workspace, mode=mode, session_rules=session_rules),
+        sandbox=sandbox_for(settings),
+        retry=retry_policy(settings),
+        on_remember=on_remember,
+        env_keep=keep,
     )
 
 
@@ -123,6 +180,7 @@ async def run_goal(
     extra_sink: EventSink | None = None,
     session_id: str | None = None,
     sessions: SessionStore | None = None,
+    mode: Mode | None = None,
 ) -> tuple[RunResult, Path]:
     """Run one goal to completion in this process. Returns the result and the run dir.
     With `session_id`, the run continues that session (its history, unless memory is
@@ -136,6 +194,12 @@ async def run_goal(
         store.add_run(session_id, run_id, run_dir, goal)
     writer = JsonlEventWriter(run_dir / "events.jsonl")
     sink: EventSink = FanoutSink(writer, extra_sink) if extra_sink else writer
+    session_rules = store.rules(session_id) if session_id is not None else None
+
+    async def remember(rules: tuple[Rule, ...]) -> None:
+        if session_id is not None:
+            await asyncio.to_thread(store.add_rules, session_id, list(rules))
+
     loop = build_loop(
         settings,
         workspace=workspace,
@@ -144,6 +208,9 @@ async def run_goal(
         provider=provider,
         tracer=run_tracer(run_id, run_dir),
         notes=notes,
+        mode=mode,
+        session_rules=session_rules,
+        on_remember=remember,
     )
     status = "error"
     try:

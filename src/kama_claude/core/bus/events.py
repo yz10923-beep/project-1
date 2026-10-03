@@ -50,6 +50,10 @@ class RunStartedEvent(_RunEvent):
     history_messages: int = Field(default=0, description="Messages carried in from the session.")
     repaired: int = Field(default=0, description="Missing tool results added to that history.")
     preamble: str | None = Field(default=None, description="Memory block sent before the goal.")
+    # S5: the run's permission mode and sandbox, as they were when it started.
+    policy: dict[str, Any] | None = Field(
+        default=None, description="mode, sandbox backend, rule counts, warnings; None = off."
+    )
 
 
 class LLMResponseEvent(_RunEvent):
@@ -77,6 +81,35 @@ class ToolApprovalRequestedEvent(_RunEvent):
     tool_use_id: str
     name: str
     input: dict[str, Any]
+    # S5: why the policy asks, so a client can show the risk (empty with policy off).
+    risk: str = ""
+    reason: str = ""
+    rule: str = ""
+    remember: list[str] = Field(
+        default_factory=list, description="What 'always allow' would add for this session."
+    )
+
+
+class ToolPolicyEvent(_RunEvent):
+    """The policy decided a tool call without asking anyone (S5): a deny (the call did not
+    run) or an allow of something beyond reading."""
+
+    type: Literal["tool.policy"] = "tool.policy"
+    step: int
+    tool_use_id: str
+    name: str
+    action: Literal["allow", "deny"]
+    rule: str
+    reason: str
+    risk: str
+    kind: str
+    network: bool = False
+    effects: list[str] = Field(default_factory=list)
+    repeated: bool = Field(
+        default=False,
+        description="A deny after an earlier deny by the same rule or of the "
+        "same call: the model is trying again, in another form or not.",
+    )
 
 
 class ToolApprovalResolvedEvent(_RunEvent):
@@ -85,6 +118,10 @@ class ToolApprovalResolvedEvent(_RunEvent):
     tool_use_id: str
     approved: bool
     by: str = Field(description="user | auto | timeout | ...: who or what decided.")
+    reason: str = Field(default="", description="The user's reason for a denial (S5).")
+    remembered: list[str] = Field(
+        default_factory=list, description="Rules added for the session by 'always allow'."
+    )
 
 
 class LLMDeltaEvent(BaseModel):
@@ -107,6 +144,24 @@ class ToolFinishedEvent(_RunEvent):
     output: str
     duration_ms: int = Field(description="Tool execution time only; 0 if denied.")
     approval_ms: int = Field(default=0, description="Time spent waiting for the user.")
+    error_kind: str | None = Field(
+        default=None,
+        description="invalid_input | unknown_tool | not_found | blocked | denied | timeout | "
+        "crashed | ... (S5); None when the call succeeded.",
+    )
+
+
+class LLMRetryEvent(_RunEvent):
+    """A model call failed with a retryable error and will be tried again after `wait_s`
+    (S5). Text streamed during the failed attempt is void: clients drop it."""
+
+    type: Literal["llm.retry"] = "llm.retry"
+    step: int
+    attempt: int = Field(description="The attempt that failed, from 1.")
+    kind: str
+    error: str
+    wait_s: float
+    status: int | None = None
 
 
 class PlanUpdatedEvent(_RunEvent):
@@ -170,6 +225,12 @@ class RunFinishedEvent(_RunEvent):
     budget_credit: int = Field(
         default=0, description="Plan-only steps not counted against max_steps."
     )
+    # S5 counters: what the policy and the retries did during the run.
+    policy_denials: int = 0
+    repeat_denials: int = Field(default=0, description="Denials of something already denied.")
+    approvals_asked: int = 0
+    llm_retries: int = 0
+    tool_errors: dict[str, int] = Field(default_factory=dict, description="By error kind.")
 
 
 Event = Annotated[
@@ -180,7 +241,9 @@ Event = Annotated[
     | ToolStartedEvent
     | ToolApprovalRequestedEvent
     | ToolApprovalResolvedEvent
+    | ToolPolicyEvent
     | ToolFinishedEvent
+    | LLMRetryEvent
     | PlanUpdatedEvent
     | PlanReminderEvent
     | PlanNoticeEvent

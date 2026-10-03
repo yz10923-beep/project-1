@@ -46,6 +46,18 @@ class Settings(BaseModel):
     memory_dir: Path = Path("~/.kama/memory")  # durable notes, per workspace
     # Outside any workspace, so the agent never reads its own (or other runs') logs.
     runs_dir: Path = Path("~/.kama/runs")
+    # S5: every tool call goes through the permission policy (false = the S4 approvals:
+    # ask for bash/write_file, -y approves everything), and bash runs in the OS sandbox
+    # (auto = the best backend that works here; off = run directly).
+    policy: bool = True
+    policy_file: Path = Path("~/.kama/policy.toml")
+    sandbox: Literal["auto", "bwrap", "unshare", "off"] = "auto"
+    # Environment variables kept for bash although they look like credentials (comma list).
+    bash_env_keep: str = ""
+    # Model calls that fail with a retryable error (429, 529, 5xx, network) are retried
+    # with backoff, up to this many times and this much total waiting per call.
+    llm_max_retries: int = Field(default=4, ge=0, le=20)
+    llm_retry_budget_s: float = Field(default=120, ge=0)
     anthropic_api_key: SecretStr | None = None
 
     # daemon: auth token file (mode 0600), and how long a run waits for a human approval

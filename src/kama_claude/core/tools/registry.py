@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from kama_claude.core.tools.base import Tool, ToolContext, ToolError, ToolResult
 
@@ -38,20 +38,49 @@ class ToolRegistry:
         return [self._tools[name].spec() for name in sorted(self._tools)]
 
     async def execute(self, name: str, raw_input: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        """Run one tool call. Every failure becomes an is_error result the model can read."""
+        """Run one tool call. Every failure becomes an is_error result the model can read,
+        with an error_kind saying what went wrong (and so whether trying again can help)."""
         tool = self._tools.get(name)
         if tool is None:
-            return ToolResult(f"Unknown tool: {name}. Available: {sorted(self._tools)}", True)
+            return ToolResult(
+                f"Unknown tool: {name}. Available: {sorted(self._tools)}", True, "unknown_tool"
+            )
         try:
             params = tool.params_model.model_validate(raw_input)
         except ValidationError as e:
-            return ToolResult(f"Invalid input for {name}:\n{e}", True)
+            return ToolResult(
+                format_validation_error(name, e, tool.params_model), True, "invalid_input"
+            )
         try:
             result = await tool.run(params, ctx)
         except ToolError as e:
-            return ToolResult(f"Error: {e}", True)
+            return ToolResult(f"Error: {e}", True, e.kind)
         except Exception as e:
             # Unexpected bug in the tool: log the traceback, give the model a short message.
             logger.exception("tool %s crashed", name)
-            return ToolResult(f"Tool {name} failed unexpectedly: {type(e).__name__}: {e}", True)
-        return ToolResult(truncate_middle(result.content), result.is_error)
+            return ToolResult(
+                f"Tool {name} failed unexpectedly: {type(e).__name__}: {e}. This is a bug in "
+                "the tool, not in your input; the same call will likely fail again.",
+                True,
+                "crashed",
+            )
+        content = truncate_middle(result.content)
+        return ToolResult(content, result.is_error, result.error_kind if result.is_error else None)
+
+
+def format_validation_error(name: str, e: ValidationError, model: type[BaseModel]) -> str:
+    """One line per bad field, then the expected shape: shorter for the model than
+    pydantic's dump, and it says what to send instead."""
+    lines = [f"Invalid input for {name}:"]
+    for err in e.errors():
+        where = ".".join(str(x) for x in err["loc"]) or "(input)"
+        got = ""
+        if err["type"] not in {"missing", "extra_forbidden"} and "input" in err:
+            got = f" (got {str(err['input'])[:60]!r})"
+        lines.append(f"- {where}: {err['msg']}{got}")
+    fields = []
+    for fname, f in model.model_fields.items():
+        ann = getattr(f.annotation, "__name__", str(f.annotation))
+        fields.append(f'"{fname}"{"" if f.is_required() else "?"}: {ann}')
+    lines.append("Expected: {" + ", ".join(fields) + "}. Fix the input and call again.")
+    return "\n".join(lines)

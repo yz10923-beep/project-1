@@ -9,11 +9,13 @@ from dataclasses import dataclass, field
 from kama_claude.core.bus.events import (
     Event,
     LLMResponseEvent,
+    LLMRetryEvent,
     PlanUpdatedEvent,
     RunFinishedEvent,
     RunStartedEvent,
     ToolApprovalRequestedEvent,
     ToolApprovalResolvedEvent,
+    ToolPolicyEvent,
     is_durable,
 )
 from kama_claude.core.llm.pricing import cost_usd
@@ -36,6 +38,9 @@ class RunView:
     pending: dict[str, ToolApprovalRequestedEvent] = field(default_factory=dict)
     next_seq: int = 0  # resume point after a disconnect or a lagged stream
     error: str | None = None
+    mode: str | None = None  # the permission mode (S5); None = policy off
+    blocked: int = 0
+    retries: int = 0
 
     @property
     def finished(self) -> bool:
@@ -53,6 +58,11 @@ class RunView:
             case RunStartedEvent():
                 self.goal, self.model, self.workspace = event.goal, event.model, event.workspace
                 self.planning, self.status = event.planning, "running"
+                self.mode = event.policy["mode"] if event.policy else None
+            case ToolPolicyEvent(action="deny"):
+                self.blocked += 1
+            case LLMRetryEvent():
+                self.retries += 1
             case LLMResponseEvent():
                 self.step = event.step
                 self.usage = self.usage + event.usage
@@ -89,6 +99,13 @@ class RunView:
             parts.append(f"plan {done}/{len(self.plan)}")
         if self.pending:
             parts.append(f"{len(self.pending)} awaiting approval")
-        parts.append("auto-approve ON" if auto_approve else "asks before bash/write")
+        if self.blocked:
+            parts.append(f"{self.blocked} blocked")
+        if self.retries:
+            parts.append(f"{self.retries} model retries")
+        if self.mode is not None:
+            parts.append(f"mode {self.mode}")
+        else:
+            parts.append("auto-approve ON" if auto_approve else "asks before bash/write")
         parts.append(connection)
         return " · ".join(parts)

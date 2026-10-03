@@ -45,6 +45,9 @@ class PongResult(BaseModel):
     server_version: str
     uptime_ms: int = Field(ge=0)
     received_at: datetime
+    # S5: what protects tool calls on this daemon.
+    policy: bool | None = None
+    sandbox: str | None = Field(default=None, description="bwrap | unshare | none, and why.")
 
 
 # ---- runs
@@ -61,6 +64,8 @@ class RunStartParams(_Params):
     # S4: continue a session (its history and notes), or start a new one for this run.
     session_id: str | None = Field(default=None, description="Continue this session.")
     new_session: bool = Field(default=False, description="Start a session with this run.")
+    # S5: the permission mode; None = auto when auto_approve, else the user file's or default.
+    mode: Literal["default", "accept-edits", "auto", "read-only"] | None = None
 
 
 class RunStartResult(BaseModel):
@@ -123,6 +128,8 @@ class ApprovalRespondParams(_Params):
     run_id: str
     tool_use_id: str
     approve: bool
+    reason: str = Field(default="", max_length=500, description="Why not; told to the model.")
+    remember: bool = Field(default=False, description="Always allow this for the session.")
 
 
 class ApprovalRespondResult(BaseModel):

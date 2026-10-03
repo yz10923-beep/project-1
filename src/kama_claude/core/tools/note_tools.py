@@ -65,7 +65,7 @@ class NoteSave(Tool[NoteSaveParams]):
                 book.save, params.text, params.scope, params.source, params.volatile
             )
         except NoteError as e:
-            raise ToolError(str(e)) from e
+            raise ToolError(str(e), "rejected") from e
         return ToolResult(f"Saved [{note.id}] ({note.scope}).")
 
 
@@ -88,7 +88,7 @@ class NoteUpdate(Tool[NoteUpdateParams]):
                 book.update, params.id, params.text, params.source, params.volatile
             )
         except NoteError as e:
-            raise ToolError(str(e)) from e
+            raise ToolError(str(e), "rejected") from e
         return ToolResult(f"Updated: {render_note(note, datetime.now(UTC))}")
 
 
@@ -107,7 +107,7 @@ class NoteDelete(Tool[NoteDeleteParams]):
         try:
             note = await asyncio.to_thread(book.delete, params.id, params.reason)
         except NoteError as e:
-            raise ToolError(str(e)) from e
+            raise ToolError(str(e), "rejected") from e
         return ToolResult(f"Deleted [{note.id}].")
 
 

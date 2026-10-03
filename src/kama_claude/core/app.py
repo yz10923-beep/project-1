@@ -68,6 +68,8 @@ from kama_claude.core.config import ConfigError, Settings, load_settings
 from kama_claude.core.llm.types import LLMProvider
 from kama_claude.core.notes import NoteError
 from kama_claude.core.plan import PlanError
+from kama_claude.core.policy.engine import PolicyFileError
+from kama_claude.core.sandbox import SandboxUnavailable
 from kama_claude.core.session import SessionInfo, UnknownSession
 from kama_claude.core.trace.tracer import JsonlSpanWriter, Tracer
 from kama_claude.core.transport.server import Connection, JsonRpcServer, RequestError, RpcRecord
@@ -146,6 +148,8 @@ class CoreApp:
             server_version=__version__,
             uptime_ms=int((time.monotonic() - self._started) * 1000),
             received_at=datetime.now(UTC),
+            policy=self.settings.policy,
+            sandbox=self.runs.sandbox.describe(),
         )
 
     async def on_run_start(self, params: RunStartParams, conn: Connection) -> RunStartResult:
@@ -159,8 +163,9 @@ class CoreApp:
                 max_steps=params.max_steps,
                 session_id=params.session_id,
                 new_session=params.new_session,
+                mode=params.mode,
             )
-        except SessionError as e:
+        except (SessionError, PolicyFileError) as e:
             raise RequestError(str(e)) from e
         logger.info("run %s started by %s in %s", handle.run_id, conn.client, workspace)
         return RunStartResult(
@@ -204,7 +209,13 @@ class CoreApp:
         self, params: ApprovalRespondParams, conn: Connection
     ) -> ApprovalRespondResult:
         try:
-            ok = self.runs.respond(params.run_id, params.tool_use_id, params.approve)
+            ok = self.runs.respond(
+                params.run_id,
+                params.tool_use_id,
+                params.approve,
+                reason=params.reason,
+                remember=params.remember,
+            )
         except UnknownRun as e:
             raise RequestError(f"unknown run: {e}") from e
         return ApprovalRespondResult(accepted=ok)
@@ -338,6 +349,9 @@ def main() -> None:
     )
     try:
         asyncio.run(CoreApp(settings).run())
+    except SandboxUnavailable as e:
+        print(f"kama-core: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
     except OSError as e:
         # Most commonly EADDRINUSE: another daemon already owns the port.
         print(f"kama-core: cannot listen on {settings.host}:{settings.port}: {e}", file=sys.stderr)

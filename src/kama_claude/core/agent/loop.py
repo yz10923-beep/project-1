@@ -20,8 +20,10 @@ with open tasks it is reminded once instead of the run finishing: the plan turns
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -34,6 +36,7 @@ from kama_claude.core.agent.sinks import EventSink
 from kama_claude.core.bus.events import (
     LLMDeltaEvent,
     LLMResponseEvent,
+    LLMRetryEvent,
     NoteUpdatedEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
@@ -44,9 +47,11 @@ from kama_claude.core.bus.events import (
     ToolApprovalRequestedEvent,
     ToolApprovalResolvedEvent,
     ToolFinishedEvent,
+    ToolPolicyEvent,
     ToolStartedEvent,
 )
 from kama_claude.core.llm.pricing import cost_usd
+from kama_claude.core.llm.retry import NO_RETRY, RetryPolicy
 from kama_claude.core.llm.types import LLMError, LLMProvider, Message, ToolCall, Usage
 from kama_claude.core.notes import NoteBook, NoteStore
 from kama_claude.core.plan import (
@@ -60,6 +65,8 @@ from kama_claude.core.plan import (
     render_task,
     render_tasks,
 )
+from kama_claude.core.policy.engine import Decision, Policy, Rule, call_key, denial_message
+from kama_claude.core.sandbox import Sandbox
 from kama_claude.core.tools.base import ToolContext, ToolResult
 from kama_claude.core.tools.note_tools import NOTE_TOOL_NAMES
 from kama_claude.core.tools.registry import ToolRegistry
@@ -72,13 +79,28 @@ logger = logging.getLogger(__name__)
 class ApprovalDecision:
     approved: bool
     by: str  # user | auto | timeout | ...
+    reason: str = ""  # the user's reason for a denial; passed on to the model
+    remember: bool = False  # "always allow": add the policy's suggested rules for the session
 
 
-# Decides whether a side-effecting tool call may run. May return a plain bool (taken as
-# the user's answer). S5 replaces this with a policy engine.
+# Answers the calls the policy says to ask about (with policy off: every bash/write_file
+# call). May return a plain bool, taken as the user's answer.
 type Approver = Callable[[ToolCall], Awaitable[bool | ApprovalDecision]]
+# Called when the user answers "always allow", to keep the new rules (e.g. in the session).
+type RememberRules = Callable[[tuple[Rule, ...]], Awaitable[None]]
 
 DENIED_MESSAGE = "The user denied this tool call. Do not retry it; choose another approach or stop."
+# The same failing call again and again is a loop, not progress.
+REPEAT_FAILURE_LIMIT = 3
+
+
+def denied_by_user(reason: str) -> str:
+    if not reason:
+        return DENIED_MESSAGE
+    return (
+        f"The user denied this tool call and said: {reason!r}. Do not retry it; take that "
+        "into account and choose another approach, or stop."
+    )
 
 
 def plan_step_allowance(max_steps: int) -> int:
@@ -132,6 +154,15 @@ class _RunState:
     budget_credit: int = 0  # plan-only steps not counted against max_steps
     last_step_plan_only: bool = False
     notes_changed: int = 0
+    # S5
+    policy_denials: int = 0
+    repeat_denials: int = 0
+    approvals_asked: int = 0
+    llm_retries: int = 0
+    tool_errors: Counter[str] = field(default_factory=Counter)
+    failures: Counter[str] = field(default_factory=Counter)  # call key -> times it failed
+    denied_calls: set[str] = field(default_factory=set)
+    denied_rules: set[str] = field(default_factory=set)
 
     @property
     def budget_used(self) -> int:
@@ -172,11 +203,26 @@ class AgentLoop:
         max_steps: int = 30,
         tracer: Tracer | None = None,
         notes: NoteStore | None = None,
+        policy: Policy | None = None,
+        sandbox: Sandbox | None = None,
+        retry: RetryPolicy = NO_RETRY,
+        on_remember: RememberRules | None = None,
+        env_keep: frozenset[str] = frozenset(),
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._sink = sink
-        self._ctx = ToolContext(workspace=workspace.resolve())
+        self._base_ctx = ToolContext(
+            workspace=workspace.resolve(), sandbox=sandbox, env_keep=env_keep
+        )
+        self._ctx = self._base_ctx
+        # S5: None = the S4 approvals (ask for every requires_approval tool).
+        self._policy = policy
+        self._sandbox = sandbox
+        self._retry = retry
+        self._on_remember = on_remember
+        self._sleep = sleep
         self._approver = approver
         self._max_steps = max_steps
         self._tracer = tracer or Tracer.noop()
@@ -281,7 +327,7 @@ class AgentLoop:
             if self._memory and self._notes is not None
             else None
         )
-        self._ctx = ToolContext(workspace=self._ctx.workspace, plan=Plan(), notes=book)
+        self._ctx = dataclasses.replace(self._base_ctx, plan=Plan(), notes=book)
         state = self._state = _RunState()
         self._pending_notices = []
         self._run_id = run_id
@@ -298,6 +344,7 @@ class AgentLoop:
                 history_messages=len(history),
                 repaired=repaired,
                 preamble=preamble,
+                policy=self._policy_summary(),
             )
         )
 
@@ -319,6 +366,11 @@ class AgentLoop:
                     retryable=retryable,
                     plan_only_steps=state.plan_only_steps,
                     budget_credit=state.budget_credit,
+                    policy_denials=state.policy_denials,
+                    repeat_denials=state.repeat_denials,
+                    approvals_asked=state.approvals_asked,
+                    llm_retries=state.llm_retries,
+                    tool_errors=dict(state.tool_errors),
                 )
             )
             return RunResult(run_id, status, text, state.steps, state.usage, error, retryable)
@@ -369,23 +421,50 @@ class AgentLoop:
         async def on_text(text: str) -> None:
             await self._sink.emit(LLMDeltaEvent(run_id=run_id, step=step, text=text))
 
-        t_llm = time.monotonic()
-        with self._tracer.span("llm.call", "llm", step=step) as llm_span:
-            try:
-                resp = await self._provider.complete(
-                    system=system, messages=messages, tools=tools, on_text=on_text
+        attempt, waited = 0, 0.0
+        while True:
+            attempt += 1
+            t_llm = time.monotonic()
+            failed: LLMError | None = None
+            with self._tracer.span("llm.call", "llm", step=step, attempt=attempt) as llm_span:
+                try:
+                    resp = await self._provider.complete(
+                        system=system, messages=messages, tools=tools, on_text=on_text
+                    )
+                except LLMError as e:
+                    llm_span.fail(str(e))
+                    llm_span.set(error_kind=e.kind, status=e.status)
+                    failed = e
+                else:
+                    usage = resp.usage.model_dump()
+                    llm_span.set(
+                        model=resp.model,
+                        stop_reason=resp.stop_reason,
+                        ttft_ms=resp.ttft_ms,
+                        cost_usd=cost_usd(resp.model, usage),
+                        **usage,
+                    )
+            if failed is None:
+                break
+            delay = self._retry.delay(failed, attempt)
+            if not self._retry.should_retry(failed, attempt, waited, delay):
+                tries = f" (after {attempt - 1} retries)" if attempt > 1 else ""
+                return _Finish("error", error=f"{failed}{tries}", retryable=failed.retryable)
+            state.llm_retries += 1
+            await self._sink.emit(
+                LLMRetryEvent(
+                    **self._meta(run_id),
+                    step=step,
+                    attempt=attempt,
+                    kind=failed.kind,
+                    error=str(failed)[:500],
+                    wait_s=round(delay, 3),
+                    status=failed.status,
                 )
-            except LLMError as e:
-                llm_span.fail(str(e))
-                return _Finish("error", error=str(e), retryable=e.retryable)
-            usage = resp.usage.model_dump()
-            llm_span.set(
-                model=resp.model,
-                stop_reason=resp.stop_reason,
-                ttft_ms=resp.ttft_ms,
-                cost_usd=cost_usd(resp.model, usage),
-                **usage,
             )
+            with self._tracer.span("llm.backoff", "llm", step=step, wait_s=round(delay, 3)):
+                await self._sleep(delay)
+            waited += delay
         state.usage = state.usage + resp.usage
         await self._sink.emit(
             LLMResponseEvent(
@@ -504,7 +583,9 @@ class AgentLoop:
             out = await self._approve_and_execute(run_id, step, call)
             span.set(denied=out.denied, output_chars=len(out.result.content))
             if out.result.is_error:
+                span.set(error_kind=out.result.error_kind)
                 span.fail("denied" if out.denied else out.result.content[:200])
+        out = self._guard_repeats(call, out)
         # Only a plan tool can have changed the plan on the model's behalf: a user edit
         # that lands while (say) bash runs has already been recorded as by="user".
         if call.name in PLAN_TOOL_NAMES and self._ctx.plan.version != plan_version:
@@ -538,6 +619,7 @@ class AgentLoop:
                 output=out.result.content,
                 duration_ms=out.duration_ms,
                 approval_ms=out.approval_ms,
+                error_kind=out.result.error_kind,
             )
         )
         block: dict[str, Any] = {
@@ -549,43 +631,180 @@ class AgentLoop:
             block["is_error"] = True
         return block
 
+    def _guard_repeats(self, call: ToolCall, out: _ToolOutcome) -> _ToolOutcome:
+        """Count failures by kind; when the exact same call has failed several times, say so
+        in its result (appended to this result, so history stays append-only)."""
+        if not out.result.is_error:
+            return out
+        state = self._state
+        state.tool_errors[out.result.error_kind or "failed"] += 1
+        key = call_key(call.name, call.input)
+        state.failures[key] += 1
+        n = state.failures[key]
+        if n < REPEAT_FAILURE_LIMIT or out.result.error_kind == "blocked":
+            return out  # policy denials carry their own "already tried" wording
+        note = (
+            f"\n\n[This exact call has now failed {n} times. Calling it again unchanged will "
+            "fail the same way: change the input, use another approach, or stop and explain.]"
+        )
+        result = dataclasses.replace(out.result, content=out.result.content + note)
+        return dataclasses.replace(out, result=result)
+
+    def _policy_summary(self) -> dict[str, Any] | None:
+        if self._policy is None:
+            return None
+        p = self._policy
+        return {
+            "mode": p.mode,
+            "sandbox": (self._sandbox or Sandbox("none")).backend,
+            "user_rules": len(p.user_rules),
+            "workspace_rules": len(p.workspace_rules),
+            "session_rules": len(p.session_rules),
+            "warnings": p.warnings,
+        }
+
+    async def _execute(self, call: ToolCall, network: bool) -> tuple[ToolResult, int]:
+        t_exec = time.monotonic()
+        ctx = (
+            self._ctx
+            if network == self._ctx.network
+            else dataclasses.replace(self._ctx, network=network)
+        )
+        with self._tracer.span("tool.exec", "tool", network=network):
+            result = await self._registry.execute(call.name, call.input, ctx)
+        return result, _ms_since(t_exec)
+
+    async def _ask(
+        self, run_id: str, step: int, call: ToolCall, decision: Decision | None
+    ) -> tuple[ApprovalDecision, int]:
+        """Ask the approver (a human, through whichever client answers first)."""
+        self._state.approvals_asked += 1
+        await self._sink.emit(
+            ToolApprovalRequestedEvent(
+                **self._meta(run_id),
+                step=step,
+                tool_use_id=call.id,
+                name=call.name,
+                input=call.input,
+                risk=decision.risk if decision else "",
+                reason=decision.reason if decision else "",
+                rule=decision.rule if decision else "",
+                remember=[_describe_rule(r) for r in decision.remember] if decision else [],
+            )
+        )
+        t_wait = time.monotonic()
+        with self._tracer.span("tool.approval", "tool") as approval_span:
+            answer = await self._approver(call)
+            approval = (
+                answer if isinstance(answer, ApprovalDecision) else ApprovalDecision(answer, "user")
+            )
+            approval_span.set(approved=approval.approved, by=approval.by)
+        approval_ms = _ms_since(t_wait)
+        remembered: tuple[Rule, ...] = ()
+        if approval.approved and approval.remember and decision and self._policy is not None:
+            remembered = decision.remember
+            self._policy.remember(remembered)
+            if self._on_remember is not None and remembered:
+                await self._on_remember(remembered)
+        await self._sink.emit(
+            ToolApprovalResolvedEvent(
+                **self._meta(run_id),
+                step=step,
+                tool_use_id=call.id,
+                approved=approval.approved,
+                by=approval.by,
+                reason=approval.reason,
+                remembered=[_describe_rule(r) for r in remembered],
+            )
+        )
+        return approval, approval_ms
+
     async def _approve_and_execute(self, run_id: str, step: int, call: ToolCall) -> _ToolOutcome:
         # Human wait and tool execution are timed separately: mixing them makes tool
         # latency and trajectory-efficiency numbers meaningless.
+        if self._policy is None:  # S4: ask for every side-effecting tool
+            approval_ms = 0
+            tool = self._registry.get(call.name)
+            if tool is not None and tool.requires_approval:
+                approval, approval_ms = await self._ask(run_id, step, call, None)
+                if not approval.approved:
+                    return _ToolOutcome(
+                        ToolResult(denied_by_user(approval.reason), True, "denied"),
+                        True,
+                        approval_ms,
+                        0,
+                    )
+            result, duration = await self._execute(call, network=True)
+            return _ToolOutcome(result, False, approval_ms, duration)
+
+        with self._tracer.span("tool.policy", "tool") as policy_span:
+            decision = self._policy.check(call.name, call.input)
+            policy_span.set(action=decision.action, rule=decision.rule, kind=decision.kind)
+        if decision.action == "deny":
+            return await self._deny(run_id, step, call, decision)
         approval_ms = 0
-        tool = self._registry.get(call.name)
-        if tool is not None and tool.requires_approval:
+        if decision.action == "ask":
+            approval, approval_ms = await self._ask(run_id, step, call, decision)
+            if not approval.approved:
+                return _ToolOutcome(
+                    ToolResult(denied_by_user(approval.reason), True, "denied"),
+                    True,
+                    approval_ms,
+                    0,
+                )
+        elif decision.kind != "read":
             await self._sink.emit(
-                ToolApprovalRequestedEvent(
+                ToolPolicyEvent(
                     **self._meta(run_id),
                     step=step,
                     tool_use_id=call.id,
                     name=call.name,
-                    input=call.input,
+                    action="allow",
+                    rule=decision.rule,
+                    reason=decision.reason,
+                    risk=decision.risk,
+                    kind=decision.kind,
+                    network=decision.network,
+                    effects=decision.to_event()["effects"],
                 )
             )
-            t_wait = time.monotonic()
-            with self._tracer.span("tool.approval", "tool") as approval_span:
-                answer = await self._approver(call)
-                decision = (
-                    answer
-                    if isinstance(answer, ApprovalDecision)
-                    else ApprovalDecision(answer, "user")
-                )
-                approval_span.set(approved=decision.approved, by=decision.by)
-            approval_ms = _ms_since(t_wait)
-            await self._sink.emit(
-                ToolApprovalResolvedEvent(
-                    **self._meta(run_id),
-                    step=step,
-                    tool_use_id=call.id,
-                    approved=decision.approved,
-                    by=decision.by,
-                )
+        result, duration = await self._execute(call, network=decision.network)
+        return _ToolOutcome(result, False, approval_ms, duration)
+
+    async def _deny(
+        self, run_id: str, step: int, call: ToolCall, decision: Decision
+    ) -> _ToolOutcome:
+        state = self._state
+        key = call_key(call.name, call.input)
+        # Denied before, as this exact call or by the same rule: the model is trying again
+        # (often the same thing in another form). Counted, and told so more firmly.
+        rule_key = f"{decision.rule}|{decision.kind}"
+        repeated = key in state.denied_calls or rule_key in state.denied_rules
+        state.denied_calls.add(key)
+        state.denied_rules.add(rule_key)
+        state.policy_denials += 1
+        state.repeat_denials += repeated
+        await self._sink.emit(
+            ToolPolicyEvent(
+                **self._meta(run_id),
+                step=step,
+                tool_use_id=call.id,
+                name=call.name,
+                action="deny",
+                rule=decision.rule,
+                reason=decision.reason,
+                risk=decision.risk,
+                kind=decision.kind,
+                network=decision.network,
+                effects=decision.to_event()["effects"],
+                repeated=repeated,
             )
-            if not decision.approved:
-                return _ToolOutcome(ToolResult(DENIED_MESSAGE, is_error=True), True, approval_ms, 0)
-        t_exec = time.monotonic()
-        with self._tracer.span("tool.exec", "tool"):
-            result = await self._registry.execute(call.name, call.input, self._ctx)
-        return _ToolOutcome(result, False, approval_ms, _ms_since(t_exec))
+        )
+        text = denial_message(decision, repeated=repeated)
+        return _ToolOutcome(ToolResult(text, True, "blocked"), True, 0, 0)
+
+
+def _describe_rule(r: Rule) -> str:
+    if r.command:
+        return f"{r.tool}: {r.command}"
+    return f"{r.tool}" + (f" ({', '.join(r.effect)})" if r.effect else "")

@@ -254,3 +254,80 @@ def test_effort_is_not_sent_to_models_that_reject_it() -> None:
     assert "output_config" not in haiku.build_request(system="s", messages=[], tools=[])
     opus = AnthropicProvider(model="claude-opus-5", max_tokens=1, effort="high", api_key="k")
     assert opus.effort == "high"
+
+
+# ---------------------------------------------------------------- S5: error kinds, retry-after
+
+
+def _provider(handler: Any) -> AnthropicProvider:
+    client = anthropic.AsyncAnthropic(
+        api_key="k",
+        max_retries=0,
+        http_client=anthropic.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)),
+    )
+    return AnthropicProvider(model="claude-opus-5", max_tokens=10, client=client)
+
+
+async def _fail(handler: Any) -> LLMError:
+    with pytest.raises(LLMError) as exc:
+        await _provider(handler).complete(
+            system="s", messages=[{"role": "user", "content": "hi"}], tools=[]
+        )
+    return exc.value
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type", "kind", "retryable"),
+    [
+        (429, "rate_limit_error", "rate_limit", True),
+        (529, "overloaded_error", "overloaded", True),
+        (500, "api_error", "server", True),
+        (400, "invalid_request_error", "invalid_request", False),
+        (401, "authentication_error", "auth", False),
+        (404, "not_found_error", "not_found", False),
+        (413, "request_too_large", "too_large", False),
+    ],
+)
+async def test_errors_are_classified_by_api_type(
+    status: int, error_type: str, kind: str, retryable: bool
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            status,
+            headers={"retry-after": "7"},
+            json={"type": "error", "error": {"type": error_type, "message": "x"}},
+        )
+
+    e = await _fail(handler)
+    assert (e.kind, e.retryable, e.status, e.retry_after_s) == (kind, retryable, status, 7.0)
+
+
+async def test_overload_mid_stream_is_retryable() -> None:
+    """The API can fail after streaming has started: an `error` event on a 200 response."""
+    head = sse([{"type": "text", "text": "partial"}], "end_turn").content.decode()
+    cut = head.split("event: content_block_stop")[0]
+    error = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+    body = cut + f"event: error\ndata: {json.dumps(error)}\n\n"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, headers={"content-type": "text/event-stream"}, content=body.encode()
+        )
+
+    e = await _fail(handler)
+    assert (e.kind, e.retryable, e.status) == ("overloaded", True, 200)
+
+
+def test_retry_after_headers() -> None:
+    from kama_claude.core.llm.anthropic_provider import retry_after
+
+    assert retry_after({"retry-after-ms": "1500", "retry-after": "9"}) == 1.5
+    assert retry_after({"retry-after": "3"}) == 3.0
+    assert retry_after({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}) is None
+    assert retry_after({}) is None
+
+
+def test_the_sdk_does_not_retry_behind_our_back() -> None:
+    from kama_claude.core.llm.anthropic_provider import make_client
+
+    assert make_client("k").max_retries == 0

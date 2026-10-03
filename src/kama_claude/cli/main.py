@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kama_claude import __version__
-from kama_claude.core.agent.loop import Approver
-from kama_claude.core.agent.runner import TRACE_FILE, run_goal, runs_root
+from kama_claude.core.agent.loop import ApprovalDecision, Approver
+from kama_claude.core.agent.runner import TRACE_FILE, load_policy, run_goal, runs_root, sandbox_for
 from kama_claude.core.agent.sinks import ConsolePrinter
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
@@ -75,6 +75,7 @@ from kama_claude.core.config import ConfigError, Settings, load_settings
 from kama_claude.core.llm.types import ToolCall
 from kama_claude.core.notes import Note, render_note
 from kama_claude.core.plan import NewTask, TaskChange, render_tasks
+from kama_claude.core.policy.engine import MODES, PolicyFileError, denial_message
 from kama_claude.core.session import SessionStore
 from kama_claude.core.trace.analyze import load_spans, render, to_chrome
 from kama_claude.core.transport.client import CoreUnavailable, JsonRpcClient, RpcError, read_token
@@ -86,7 +87,8 @@ EXIT_UNAVAILABLE = 3
 EXIT_INTERRUPTED = 130
 
 # Decides an approval request: True/False to answer, None to leave it to another client.
-type Answerer = Callable[[ToolApprovalRequestedEvent], Awaitable[bool | None]]
+# None = leave it to another client; a bool is a plain yes/no.
+type Answerer = Callable[[ToolApprovalRequestedEvent], Awaitable[ApprovalDecision | bool | None]]
 
 
 def connect(settings: Settings) -> JsonRpcClient:
@@ -105,9 +107,33 @@ def _describe(name: str, tool_input: dict[str, object]) -> str:
     return f"{name}: {json.dumps(tool_input)[:300]}"
 
 
-async def _ask_user(name: str, tool_input: dict[str, object]) -> bool:
-    answer = await asyncio.to_thread(input, f"  ? allow {_describe(name, tool_input)} [y/N] ")
-    return answer.strip().lower() in {"y", "yes"}
+APPROVAL_HELP = "y = yes · a = always (this session) · n = no · n <why> = no, and tell the model"
+
+
+def parse_answer(raw: str) -> ApprovalDecision:
+    """`y`, `a` (always: remember for the session), `n`, or `n <reason>` (passed on to the
+    model so it can adjust). Anything else is a no."""
+    text = raw.strip()
+    word, _, rest = text.partition(" ")
+    word = word.lower().rstrip(",:")
+    if word in {"y", "yes"}:
+        return ApprovalDecision(True, "user")
+    if word in {"a", "always"}:
+        return ApprovalDecision(True, "user", remember=True)
+    if word in {"n", "no"}:
+        return ApprovalDecision(False, "user", reason=rest.strip())
+    return ApprovalDecision(False, "user", reason=text if len(text) > 3 else "")
+
+
+async def _ask_user(
+    name: str, tool_input: dict[str, object], can_remember: bool = False
+) -> ApprovalDecision:
+    choices = "[y/a/N]" if can_remember else "[y/N]"
+    answer = await asyncio.to_thread(input, f"  ? allow {_describe(name, tool_input)} {choices} ")
+    decision = parse_answer(answer)
+    if decision.remember and not can_remember:
+        return ApprovalDecision(True, "user")
+    return decision
 
 
 def make_answerer(auto_yes: bool, *, deny_if_not_tty: bool) -> Answerer | None:
@@ -117,15 +143,15 @@ def make_answerer(auto_yes: bool, *, deny_if_not_tty: bool) -> Answerer | None:
         return None  # the daemon auto-approves; there is nothing to answer
     if sys.stdin.isatty():
 
-        async def ask(event: ToolApprovalRequestedEvent) -> bool | None:
-            return await _ask_user(event.name, event.input)
+        async def ask(event: ToolApprovalRequestedEvent) -> ApprovalDecision | None:
+            return await _ask_user(event.name, event.input, bool(event.remember))
 
         return ask
     if deny_if_not_tty:
 
-        async def deny(event: ToolApprovalRequestedEvent) -> bool | None:
+        async def deny(event: ToolApprovalRequestedEvent) -> ApprovalDecision | None:
             print(f"  ! denied (non-interactive; pass --yes): {_describe(event.name, event.input)}")
-            return False
+            return ApprovalDecision(False, "user", reason="no one was there to approve it")
 
         return deny
     return None
@@ -146,9 +172,17 @@ async def watch(
         decision = await answer(event)
         if decision is None:
             return
+        if isinstance(decision, bool):
+            decision = ApprovalDecision(decision, "user")
         res = await client.call(
             APPROVAL_RESPOND,
-            ApprovalRespondParams(run_id=run_id, tool_use_id=event.tool_use_id, approve=decision),
+            ApprovalRespondParams(
+                run_id=run_id,
+                tool_use_id=event.tool_use_id,
+                approve=decision.approved,
+                reason=decision.reason,
+                remember=decision.remember,
+            ),
             ApprovalRespondResult,
         )
         if not res.accepted:
@@ -192,6 +226,10 @@ async def _ping(settings: Settings, args: argparse.Namespace) -> int:
         pong = await client.call(PING, PingParams(client="kama-cli"), PongResult)
         latency_ms = (time.perf_counter() - t0) * 1000
     print(f"pong server={pong.server_version} uptime={pong.uptime_ms}ms latency={latency_ms:.1f}ms")
+    if pong.policy is not None:
+        print(f"policy {'on' if pong.policy else 'OFF (KAMA_POLICY=false)'}")
+    if pong.sandbox is not None:
+        print(f"sandbox {pong.sandbox}")
     return EXIT_OK
 
 
@@ -213,6 +251,7 @@ async def _run(settings: Settings, args: argparse.Namespace) -> int:
                 auto_approve=args.yes,
                 session_id=args.session,
                 new_session=args.new_session,
+                mode=args.mode,
             ),
             RunStartResult,
         )
@@ -383,7 +422,11 @@ async def _chat(settings: Settings, args: argparse.Namespace) -> int:
             started = await client.call(
                 RUN_START,
                 RunStartParams(
-                    goal=line, workspace=str(ws), auto_approve=args.yes, session_id=session_id
+                    goal=line,
+                    workspace=str(ws),
+                    auto_approve=args.yes,
+                    session_id=session_id,
+                    mode=args.mode,
                 ),
                 RunStartResult,
             )
@@ -507,13 +550,13 @@ def _trace(settings: Settings, args: argparse.Namespace) -> int:
 def make_approver(auto_yes: bool) -> Approver:
     """In-process (--local) approvals."""
 
-    async def approve(call: ToolCall) -> bool:
+    async def approve(call: ToolCall) -> ApprovalDecision:
         if auto_yes:
-            return True
+            return ApprovalDecision(True, "auto")
         if not sys.stdin.isatty():
             print(f"  ! denied (non-interactive; pass --yes): {_describe(call.name, call.input)}")
-            return False
-        return await _ask_user(call.name, call.input)
+            return ApprovalDecision(False, "user", reason="no one was there to approve it")
+        return await _ask_user(call.name, call.input, can_remember=True)
 
     return approve
 
@@ -534,9 +577,59 @@ async def _run_local(settings: Settings, args: argparse.Namespace) -> int:
         extra_sink=ConsolePrinter(sys.stdout),
         session_id=session_id,
         sessions=store,
+        mode=args.mode or ("auto" if args.yes else None),
     )
     print(f"\nevents: {run_dir / 'events.jsonl'}")
     return EXIT_OK if result.status == "completed" else EXIT_FAILED
+
+
+def _policy(settings: Settings, args: argparse.Namespace) -> int:
+    """Show the policy for a workspace, or check what it would decide for a call. Reads the
+    same files the daemon reads; no daemon needed."""
+    ws = _workspace(args.workspace)
+    try:
+        policy = load_policy(settings, ws, mode=args.mode)
+    except PolicyFileError as e:
+        print(f"kama: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    if policy is None:
+        print("policy is off (KAMA_POLICY=false): bash and write_file ask, -y approves all")
+        return EXIT_OK
+    if args.policy_command == "show":
+        info = policy.describe()
+        print(f"mode {info['mode']} · workspace {ws}")
+        print(f"sandbox {sandbox_for(settings).describe()}")
+        print(
+            f"user file {settings.policy_file.expanduser()} · workspace file {ws}/.kama/policy.toml"
+        )
+        for label in ("user_rules", "workspace_rules"):
+            rules = info[label]
+            print(f"{label.replace('_', ' ')}: {len(rules) or 'none'}")
+            for r in rules:
+                print(f"  {r.pop('id', '')}: {json.dumps(r)}")
+        for w in info["warnings"]:
+            print(f"warning: {w}")
+        return EXIT_OK
+    if args.tool == "bash":
+        if not args.target:
+            raise UsageError("give a command to check: kama policy check 'rm -rf build'")
+        tool_input: dict[str, object] = {"command": args.target}
+    else:
+        tool_input = {"path": args.target or ".", "content": ""}
+    d = policy.check(args.tool, tool_input)
+    print(f"{d.action.upper()} ({d.kind}, {d.risk} risk) by {d.rule}")
+    print(f"  {d.reason}")
+    for effect in d.effects:
+        print(f"  - {effect.kind}: {effect.what}")
+    for o in d.opaque:
+        print(f"  ? {o}")
+    if d.network:
+        print("  network: this call may use the network (the sandbox opens it)")
+    if d.remember:
+        print("  'always' would allow: " + ", ".join(r.command or r.tool for r in d.remember))
+    if d.action == "deny":
+        print(f"\nthe model would read:\n  {denial_message(d)}")
+    return {"allow": EXIT_OK, "ask": EXIT_OK, "deny": EXIT_FAILED}[d.action]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -546,7 +639,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("ping", help="check that kama-core is up and measure round-trip latency")
     run = sub.add_parser("run", help="run the agent on a goal (in kama-core) and watch it")
     run.add_argument("goal", help="what the agent should do, in natural language")
-    run.add_argument("-y", "--yes", action="store_true", help="approve bash/write_file calls")
+    run.add_argument("-y", "--yes", action="store_true", help="unattended: --mode auto")
+    run.add_argument(
+        "--mode",
+        choices=MODES,
+        help="permission mode (default: the user policy file's, else default; -y = auto)",
+    )
     run.add_argument("-w", "--workspace", default=".", help="directory the agent works in")
     run.add_argument("--model", help="override KAMA_MODEL")
     run.add_argument("--max-steps", type=int, help="override KAMA_MAX_STEPS")
@@ -557,7 +655,12 @@ def build_parser() -> argparse.ArgumentParser:
     in_session.add_argument("--new-session", action="store_true", help="start a session")
     chat = sub.add_parser("chat", help="a conversation: each line is a run in one session")
     chat.add_argument("-w", "--workspace", default=".", help="directory the agent works in")
-    chat.add_argument("-y", "--yes", action="store_true", help="approve bash/write_file calls")
+    chat.add_argument("-y", "--yes", action="store_true", help="unattended: --mode auto")
+    chat.add_argument(
+        "--mode",
+        choices=MODES,
+        help="permission mode (default: the user policy file's, else default; -y = auto)",
+    )
     chat.add_argument("--session", metavar="ID", help="continue this session")
     session = sub.add_parser("session", help="list sessions or show one")
     session_sub = session.add_subparsers(dest="session_command", required=True)
@@ -613,6 +716,15 @@ def build_parser() -> argparse.ArgumentParser:
     tui.add_argument("-y", "--yes", action="store_true", help="auto-approve new runs")
     tui.add_argument("--goal", help="start a run with this goal right away")
     tui.add_argument("--session", metavar="ID", help="continue this conversation")
+    pol = sub.add_parser("policy", help="the permission policy: show it, or check a call")
+    pol_sub = pol.add_subparsers(dest="policy_command", required=True)
+    for name, help_text in (("show", "mode, sandbox and rules"), ("check", "what it decides")):
+        pp = pol_sub.add_parser(name, help=help_text)
+        pp.add_argument("-w", "--workspace", default=".")
+        pp.add_argument("--mode", choices=MODES)
+        if name == "check":
+            pp.add_argument("target", nargs="?", help="a bash command, or a path for --tool")
+            pp.add_argument("--tool", default="bash", choices=["bash", "write_file", "read_file"])
     trace = sub.add_parser("trace", help="where a run's time and tokens went")
     trace.add_argument("run_id", nargs="?", help="default: the latest run")
     trace.add_argument("--chrome", metavar="FILE", help="write Chrome trace JSON (Perfetto)")
@@ -646,6 +758,12 @@ def main(argv: list[str] | None = None) -> None:
     }
     if args.command == "trace":  # reads files only; no daemon, no event loop
         raise SystemExit(_trace(settings, args))
+    if args.command == "policy":  # reads policy files only
+        try:
+            raise SystemExit(_policy(settings, args))
+        except UsageError as e:
+            print(f"kama: {e}", file=sys.stderr)
+            raise SystemExit(EXIT_USAGE) from e
     if args.command == "tui":  # Textual runs its own event loop
         raise SystemExit(_tui(settings, args))
     try:

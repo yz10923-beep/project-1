@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from kama_claude.core.agent.history import replay
 from kama_claude.core.bus.events import EVENT_ADAPTER, Event
 from kama_claude.core.llm.types import Message
+from kama_claude.core.policy.engine import Rule
 
 
 class SessionRun(BaseModel):
@@ -41,6 +42,8 @@ class SessionInfo(BaseModel):
     created_at: datetime
     updated_at: datetime
     runs: list[SessionRun] = Field(default_factory=list)
+    # S5: what the user answered "always allow" to, kept for the rest of the conversation.
+    rules: list[Rule] = Field(default_factory=list)
 
 
 class UnknownSession(Exception):
@@ -119,6 +122,15 @@ class SessionStore:
             if r.run_id == run_id:
                 r.status, r.finished_at = status, now
         info.updated_at = now
+        self._write(info)
+
+    def rules(self, session_id: str) -> list[Rule]:
+        return self.get(session_id).rules
+
+    def add_rules(self, session_id: str, rules: list[Rule]) -> None:
+        info = self.get(session_id)
+        known = [r.model_dump() for r in info.rules]
+        info.rules += [r for r in rules if r.model_dump() not in known]
         self._write(info)
 
     def history(self, session_id: str, *, before_run: str | None = None) -> list[Message]:

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from kama_claude.core.app import CoreApp
 from kama_claude.core.bus.commands import (
@@ -229,7 +229,7 @@ async def test_approval_modal_allows_and_denies(rig_factory: Any) -> None:
 async def test_approval_answered_elsewhere_closes_the_modal(rig_factory: Any) -> None:
     rig = await rig_factory(
         lambda: ScriptedProvider(
-            [tool_response(("b", "bash", {"command": "true"})), text_response("ok")]
+            [tool_response(("b", "bash", {"command": "touch ok.txt"})), text_response("ok")]
         )
     )
     app = rig.tui(goal="g")
@@ -503,3 +503,49 @@ async def test_memory_panel_follows_the_agents_notes(rig_factory: Any) -> None:
         await pilot.press("d")  # cursor on the first row: w1
         await until(pilot, lambda: "RISK_DB" not in panel(app, "#memory"))
         await pilot.press("escape")
+
+
+async def test_approval_modal_shows_the_risk_and_answers_always_or_with_a_reason(
+    rig_factory: Any,
+) -> None:
+    rig = await rig_factory(
+        lambda: ScriptedProvider(
+            [
+                tool_response(("b1", "bash", {"command": "python -m pytest -q"})),
+                tool_response(("b2", "bash", {"command": "python -m pytest -x"})),  # remembered
+                tool_response(("b3", "bash", {"command": "rm -rf build"})),
+                tool_response(("b4", "bash", {"command": "rm -rf .git"})),  # never asked
+                text_response("ok"),
+            ]
+        )
+    )
+    app = rig.tui(goal="test and clean")
+    async with app.run_test(size=(140, 40)) as pilot:
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        screen = app.screen
+        assert isinstance(screen, ApprovalScreen)
+        assert (screen.event.risk, screen.event.remember) == ("medium", ["bash: python -m pytest"])
+        await pilot.press("a")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ApprovalScreen) and app.screen.event.tool_use_id == "b3",
+        )
+        await pilot.press("r")
+        await pilot.pause()
+        app.screen.query_one("#reason", Input).value = "keep build/, it's cached"
+        await pilot.press("enter")
+        await until(pilot, lambda: app.view is not None and app.view.finished)
+        text = log_text(app)
+        assert "always allowing here: bash: python -m pytest" in text
+        assert "blocked by builtin:protected-path" in text
+        assert app.view is not None and app.view.blocked == 1
+    last = rig.providers[0].requests[-1].messages
+    results = {
+        b["tool_use_id"]: b["content"]
+        for m in last
+        if m["role"] == "user" and isinstance(m["content"], list)
+        for b in m["content"]
+        if b.get("type") == "tool_result"
+    }
+    assert "keep build/, it's cached" in results["b3"]
+    assert results["b4"].startswith("Blocked by policy")

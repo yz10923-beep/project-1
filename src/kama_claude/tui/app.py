@@ -27,6 +27,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Collapsible, DataTable, Footer, Input, Label, Static
 
+from kama_claude.core.agent.loop import ApprovalDecision
 from kama_claude.core.bus.commands import (
     APPROVAL_RESPOND,
     EVENT_NOTIFICATION,
@@ -64,6 +65,7 @@ from kama_claude.core.bus.events import (
     Event,
     LLMDeltaEvent,
     LLMResponseEvent,
+    LLMRetryEvent,
     NoteUpdatedEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
@@ -73,6 +75,7 @@ from kama_claude.core.bus.events import (
     ToolApprovalRequestedEvent,
     ToolApprovalResolvedEvent,
     ToolFinishedEvent,
+    ToolPolicyEvent,
     ToolStartedEvent,
 )
 from kama_claude.core.notes import Note
@@ -198,12 +201,16 @@ class ToolBlock(Collapsible):
 # ---------------------------------------------------------------- modals
 
 
-class ApprovalScreen(ModalScreen[bool | None]):
-    """Allow or deny one tool call. Escape leaves it to another client (or the timeout)."""
+class ApprovalScreen(ModalScreen[ApprovalDecision | None]):
+    """Allow or deny one tool call, with the policy's reason and risk. `a` allows it for
+    the rest of the session; `r` denies with a reason the model is told. Escape leaves it
+    to another client (or the timeout)."""
 
     BINDINGS = [
-        Binding("y", "answer(True)", "Allow"),
-        Binding("n", "answer(False)", "Deny"),
+        Binding("y", "answer('yes')", "Allow"),
+        Binding("a", "answer('always')", "Always"),
+        Binding("n", "answer('no')", "Deny"),
+        Binding("r", "reason", "Deny, with a reason"),
         Binding("escape", "answer(None)", "Leave it"),
     ]
 
@@ -217,12 +224,36 @@ class ApprovalScreen(ModalScreen[bool | None]):
         if e.name == "write_file":
             body = f"{e.input.get('path')}\n\n{str(e.input.get('content', ''))[:2000]}"
         with Vertical(id="dialog"):
-            yield Label(f"Allow {e.name}? (step {e.step})", id="question")
+            risk = f" · {e.risk} risk" if e.risk else ""
+            yield Label(f"Allow {e.name}? (step {e.step}{risk})", id="question")
+            if e.reason:
+                yield Label(f"{e.reason}  [{e.rule}]", classes="hint")
             yield Static(Text(str(body if body is not None else json.dumps(e.input, indent=2))))
-            yield Label("y allow · n deny · esc leave it to another client", classes="hint")
+            always = f" · a always ({', '.join(e.remember)})" if e.remember else ""
+            yield Label(
+                f"y allow{always} · n deny · r deny with a reason · esc leave it",
+                classes="hint",
+            )
 
-    def action_answer(self, answer: bool | None) -> None:
-        self.dismiss(answer)
+    async def action_reason(self) -> None:
+        # Mounted only now: a focusable input from the start would swallow `y` and `n`.
+        if not self.query("#reason"):
+            box = Input(placeholder="why not? (Enter sends; the model is told)", id="reason")
+            await self.query_one("#dialog", Vertical).mount(box)
+        self.query_one("#reason", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.dismiss(ApprovalDecision(False, "user", reason=event.value.strip()))
+
+    def action_answer(self, answer: str | None) -> None:
+        if answer == "always" and not self.event.remember:
+            answer = "yes"  # nothing to remember (no policy, or a one-off)
+        self.dismiss(
+            None
+            if answer is None
+            else ApprovalDecision(answer != "no", "user", remember=answer == "always")
+        )
 
 
 class ChoiceScreen(ModalScreen[str | None]):
@@ -630,10 +661,16 @@ class KamaTui(App[None]):
             self._follow()
             return
         streamed = self._text is not None
-        self._break_text()
+        if not isinstance(event, LLMRetryEvent):
+            self._break_text()
         match event:
             case RunStartedEvent():
                 self._note(f"▶ {event.run_id}  {event.goal}", "runhead")
+                if event.policy:
+                    self._note(
+                        f"↳ mode {event.policy['mode']} · sandbox {event.policy['sandbox']}",
+                        "user",
+                    )
                 if event.session_id and event.session_id != self.session_id:
                     self.session_id = event.session_id  # watching another conversation
                     self.run_worker(self.refresh_memory(), group="memory")
@@ -680,6 +717,19 @@ class KamaTui(App[None]):
                     self.notify(f"approval answered elsewhere ({event.by})")
                 if event.by not in ("user", "auto"):
                     self._note(f"approval {event.by}: {'allowed' if event.approved else 'denied'}")
+                if event.remembered:
+                    self._note(f"✓ always allowing here: {', '.join(event.remembered)}", "user")
+            case ToolPolicyEvent(action="deny"):
+                again = " again" if event.repeated else ""
+                self._note(f"✋ blocked{again} by {event.rule}: {event.reason}", "fail")
+            case LLMRetryEvent():
+                if self._text is not None:  # streamed text of the failed attempt is void
+                    self._text.remove()
+                    self._text = None
+                self._note(
+                    f"↻ model call failed ({event.kind}); retrying in {event.wait_s:.1f}s",
+                    "note",
+                )
             case PlanUpdatedEvent():
                 self.query_one("#plan", Static).update(render_plan(event.tasks))
                 if event.by == "user":
@@ -726,14 +776,18 @@ class KamaTui(App[None]):
         screen = ApprovalScreen(event)
         self._approvals[event.tool_use_id] = screen
 
-        async def answered(answer: bool | None) -> None:
+        async def answered(answer: ApprovalDecision | None) -> None:
             if self._approvals.pop(event.tool_use_id, None) is None or answer is None:
                 return  # closed because it was answered elsewhere, or left to others
             try:
                 res = await self.rpc(
                     APPROVAL_RESPOND,
                     ApprovalRespondParams(
-                        run_id=run_id, tool_use_id=event.tool_use_id, approve=answer
+                        run_id=run_id,
+                        tool_use_id=event.tool_use_id,
+                        approve=answer.approved,
+                        reason=answer.reason,
+                        remember=answer.remember,
                     ),
                     ApprovalRespondResult,
                 )
