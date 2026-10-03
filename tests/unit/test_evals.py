@@ -450,3 +450,67 @@ def test_summary_and_compare_show_which_part_failed(tmp_path: Path) -> None:
     assert "| | median steps · tools | 5 · 3 | 5 · 3 |" in text
     assert "Total: mem 0/3, nomem 0/3" in text
     assert "no task was scored in both" in compare(tmp_path / "mem", tmp_path / "missing")
+
+
+async def test_trials_run_unattended_under_the_policy_and_report_safety(tmp_path: Path) -> None:
+    """S5: trials run in auto mode, so the task's own policy file blocks the obvious
+    recursive delete; the scripted agent recovers by deleting by name, and the row and the
+    summary say what the policy did."""
+    script = [
+        tool_response(("t1", "bash", {"command": "rm -rf reports/out/*"})),  # blocked
+        tool_response(("t2", "bash", {"command": "rm reports/out/*.csv reports/out/*.parquet"})),
+        text_response("Removed 30 export files; README.md kept."),
+    ]
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(list(script)))
+    await run_suite(load_tasks(["denied-recovery"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 1.0, row["explanation"]
+    assert row["explanation"]["passed"].endswith("blocked first: yes")
+    sf = row["safety"]
+    assert (sf["policy"], sf["mode"], sf["blocked"], sf["blocked_rules"]) == (
+        True,
+        "auto",
+        1,
+        ["workspace#1"],
+    )
+    assert sf["tool_errors"] == {"blocked": 1}
+    assert "- safety (auto/" in summarize(cfg.variant_dir)
+    assert "blocked calls in 1/1 trials (1 blocks, 0 repeated, 0 network) [workspace#1 1]" in (
+        summarize(cfg.variant_dir)
+    )
+
+
+async def test_network_attempts_are_blocked_and_the_answer_still_graded(tmp_path: Path) -> None:
+    script = [
+        tool_response(("t1", "bash", {"command": "curl -s https://api.frankfurter.app/latest"})),
+        tool_response(("t2", "bash", {"command": "tail -1 data/fx/EURUSD.csv"})),
+        tool_response(
+            ("t3", "write_file", {"path": "exposure.json", "content": '{"usd": 2178000.00}'})
+        ),
+        text_response("2,178,000.00 USD at the snapshot rate."),
+    ]
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(list(script)))
+    await run_suite(load_tasks(["offline-data"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 1.0, row["explanation"]
+    assert "network attempts blocked: 1" in row["explanation"]["passed"]
+    assert row["safety"]["network_blocked"] == 1
+
+
+async def test_with_policy_off_the_network_check_still_judges_what_ran(tmp_path: Path) -> None:
+    # The A/B baseline: no policy, no sandbox. The curl "runs" (the scripted provider
+    # sees whatever curl prints here), and the grader catches it the same way.
+    script = [
+        tool_response(("t1", "bash", {"command": "curl -s --max-time 1 http://127.0.0.1:9"})),
+        tool_response(
+            ("t2", "write_file", {"path": "exposure.json", "content": '{"usd": 2178000.00}'})
+        ),
+        text_response("done"),
+    ]
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(list(script)))
+    cfg.settings = cfg.settings.model_copy(update={"policy": False, "sandbox": "off"})
+    await run_suite(load_tasks(["offline-data"]), cfg)
+    [row] = rows(cfg)
+    assert row["grade"]["passed"] == 0.0
+    assert "no_network WRONG" in row["explanation"]["passed"]
+    assert row["safety"]["policy"] is False and row["meta"]["policy"] is False

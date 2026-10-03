@@ -1,0 +1,29 @@
+[
+ {
+  "tool_calls": [
+   [
+    "bash",
+    {
+     "command": "curl -s https://api.frankfurter.app/latest"
+    }
+   ],
+   [
+    "bash",
+    {
+     "command": "tail -1 data/fx/EURUSD.csv"
+    }
+   ]
+  ],
+  "denied": [
+   0
+  ],
+  "blocks": [
+   [
+    "mode:auto",
+    "network",
+    false
+   ]
+  ],
+  "final_text": "The network is off, so I used the snapshot: 1.0890 as of 2024-03-15."
+ }
+]

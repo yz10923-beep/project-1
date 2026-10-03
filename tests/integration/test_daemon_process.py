@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -15,13 +17,14 @@ import pytest
 from tests.conftest import Daemon, free_port, spawn_daemon
 
 
-@pytest.fixture
-def fake_stack() -> Iterator[Daemon]:
-    """A real kama-core whose model is scripts/fake_api.py (fast mode) over HTTP."""
+@contextlib.contextmanager
+def fake_stack_with(faults: str = "") -> Iterator[Daemon]:
+    """A real kama-core whose model is scripts/fake_api.py (fast mode) over HTTP; `faults`
+    makes its first requests fail (see FAKE_API_FAULTS in the script)."""
     api_port = free_port()
     api = subprocess.Popen(
         [sys.executable, "scripts/fake_api.py", str(api_port)],
-        env={**os.environ, "FAKE_API_FAST": "1"},
+        env={**os.environ, "FAKE_API_FAST": "1", "FAKE_API_FAULTS": faults},
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -30,11 +33,19 @@ def fake_stack() -> Iterator[Daemon]:
         free_port(),
         {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{api_port}", "ANTHROPIC_API_KEY": "fake"},
     )
-    yield d
-    d.proc.terminate()
-    d.proc.wait(timeout=5)
-    api.terminate()
-    api.wait(timeout=5)
+    try:
+        yield d
+    finally:
+        d.proc.terminate()
+        d.proc.wait(timeout=5)
+        api.terminate()
+        api.wait(timeout=5)
+
+
+@pytest.fixture
+def fake_stack() -> Iterator[Daemon]:
+    with fake_stack_with() as d:
+        yield d
 
 
 def run_cli(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -172,3 +183,49 @@ def test_session_and_notes_end_to_end(tmp_path: Path, fake_stack: Daemon) -> Non
     assert "[w1] python3 is on PATH here" in notes.stdout
     trace = run_cli("trace", env=d.env)
     assert f"memory  continues session {sid}" in trace.stdout
+
+
+# ---------------------------------------------------------------- S5
+
+
+def test_ping_reports_policy_and_sandbox(daemon: Daemon) -> None:
+    out = run_cli("ping", env=daemon.env)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.splitlines()
+    assert "policy on" in lines
+    assert any(line.startswith("sandbox ") for line in lines)
+
+
+def test_model_call_failures_are_retried_through_the_real_sdk(tmp_path: Path) -> None:
+    """Overloaded, overloaded mid-stream (after text was streamed), rate limited with
+    retry-after: the SDK doesn't retry (max_retries=0), the loop does, visibly."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with fake_stack_with("529,stream,429@0.1") as d:
+        out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
+    assert out.returncode == 0, out.stderr + out.stdout
+    assert out.stdout.count("↻ model call failed") == 3
+    assert "(overloaded)" in out.stdout and "(rate_limit)" in out.stdout
+    run_dir = Path(out.stdout.rsplit("events: ", 1)[1].strip()).parent
+    events = [json.loads(x) for x in (run_dir / "events.jsonl").read_text().splitlines()]
+    retries = [e for e in events if e["type"] == "llm.retry"]
+    assert [(e["attempt"], e["kind"]) for e in retries] == [
+        (1, "overloaded"),
+        (2, "overloaded"),
+        (3, "rate_limit"),
+    ]
+    assert retries[2]["wait_s"] == 0.1  # the server's retry-after
+    texts = json.dumps([e["content"] for e in events if e["type"] == "llm.response"])
+    assert "cut off" not in texts  # the broken attempt left nothing in the conversation
+    finished = events[-1]
+    assert finished["type"] == "run.finished" and finished["llm_retries"] == 3
+
+
+def test_permanent_api_errors_are_not_retried(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with fake_stack_with("400") as d:
+        out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
+    assert out.returncode == 1
+    assert "model call failed" not in out.stdout, out.stdout
+    assert "error: API error 400" in out.stdout

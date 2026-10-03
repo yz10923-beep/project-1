@@ -8,7 +8,7 @@ lint:
 	uv run ruff format --check src tests evals
 
 type:
-	uv run mypy src evals/harness.py evals/run_evals.py
+	uv run mypy src evals/harness.py evals/run_evals.py evals/policy_eval.py
 
 test:
 	uv run pytest -v
@@ -20,3 +20,4 @@ live:
 
 evals-selftest:
 	uv run python -m evals.run_evals selftest
+	uv run python -m evals.policy_eval

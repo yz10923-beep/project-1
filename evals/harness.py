@@ -42,6 +42,7 @@ from kama_claude.core.bus.events import (
     EVENT_ADAPTER,
     Event,
     LLMResponseEvent,
+    LLMRetryEvent,
     NoteUpdatedEvent,
     PlanNoticeEvent,
     PlanReminderEvent,
@@ -49,12 +50,15 @@ from kama_claude.core.bus.events import (
     RunFinishedEvent,
     RunStartedEvent,
     ToolFinishedEvent,
+    ToolPolicyEvent,
     ToolStartedEvent,
 )
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import LLMProvider, ToolCall
 from kama_claude.core.plan import PLAN_TOOL_NAMES
+from kama_claude.core.policy.classify import analyze_bash
+from kama_claude.core.policy.paths import PathContext
 from kama_claude.core.session import SessionStore
 
 FLOW = "kama-run"
@@ -111,6 +115,10 @@ class RunRecord:
     tool_calls: tuple[tuple[str, dict[str, Any]], ...] = ()
     changed: dict[str, str] = field(default_factory=dict)  # files this run changed
     new_session: bool = False
+    # S5: indexes into tool_calls that did not run (blocked by policy or denied), and
+    # each policy block as (rule, kind, repeated)
+    denied: frozenset[int] = frozenset()
+    blocks: tuple[tuple[str, str, bool], ...] = ()
 
     def touched(self, needle: str) -> bool:
         """Did any tool call mention `needle` (a path read, a command run)?"""
@@ -118,6 +126,20 @@ class RunRecord:
 
     def commands(self) -> list[str]:
         return [str(inp.get("command", "")) for name, inp in self.tool_calls if name == "bash"]
+
+    def executed_commands(self) -> list[str]:
+        """bash commands that actually ran (not blocked or denied)."""
+        return [
+            str(inp.get("command", ""))
+            for i, (name, inp) in enumerate(self.tool_calls)
+            if name == "bash" and i not in self.denied
+        ]
+
+    def network_commands(self) -> list[str]:
+        """Commands that ran and that the policy's classifier says use the network:
+        judged the same way whether the policy was on or off for this trial."""
+        ctx = PathContext.for_workspace(Path.cwd())
+        return [c for c in self.executed_commands() if analyze_bash(c, ctx).network]
 
 
 @dataclass(frozen=True)
@@ -274,7 +296,8 @@ def synthetic_runs(
     task: Task, overlay: Path | None, changed: dict[str, str], reply: str
 ) -> tuple[RunRecord, ...]:
     """Selftest stand-in for real runs: an overlay's `_runs.json` lists, per run,
-    {"tool_calls": [[name, input], ...], "final_text": ..., "changed": {...}}. Without one,
+    {"tool_calls": [[name, input], ...], "final_text": ..., "changed": {...}, "denied":
+    [indexes of calls that didn't run], "blocks": [[rule, kind, repeated], ...]}. Without one,
     the runs made no tool calls and the last one made all the changes."""
     specs = task.run_specs
     raw: list[dict[str, Any]] = []
@@ -292,6 +315,8 @@ def synthetic_runs(
                 tool_calls=tuple((n, inp) for n, inp in r.get("tool_calls", [])),
                 changed=r.get("changed", changed if last else {}),
                 new_session=spec.new_session,
+                denied=frozenset(r.get("denied", [])),
+                blocks=tuple((rule, kind, rep) for rule, kind, rep in r.get("blocks", [])),
             )
         )
     return tuple(records)
@@ -455,6 +480,29 @@ def memory_metrics(events: list[Event]) -> dict[str, int]:
     }
 
 
+def safety_metrics(events: list[Event]) -> dict[str, Any]:
+    """What the policy, the sandbox and the retries did across a trial's runs (S5)."""
+    blocks = [e for e in events if isinstance(e, ToolPolicyEvent) and e.action == "deny"]
+    finished = [e for e in events if isinstance(e, RunFinishedEvent)]
+    started = [e for e in events if isinstance(e, RunStartedEvent)]
+    errors: Counter[str] = Counter()
+    for f in finished:
+        errors.update(f.tool_errors)
+    policy = next((e.policy for e in started if e.policy), None)
+    return {
+        "policy": policy is not None,
+        "mode": policy["mode"] if policy else None,
+        "sandbox": policy["sandbox"] if policy else None,
+        "blocked": len(blocks),
+        "repeated": sum(e.repeated for e in blocks),
+        "network_blocked": sum(e.kind == "network" for e in blocks),
+        "blocked_rules": sorted({e.rule for e in blocks}),
+        "asked": sum(f.approvals_asked for f in finished),
+        "llm_retries": sum(isinstance(e, LLMRetryEvent) for e in events),
+        "tool_errors": dict(errors),
+    }
+
+
 def to_trace(task: Task, ws: Path, events: list[Event]) -> list[dict[str, Any]]:
     """Events -> the role-based transcript format eval viewers render."""
     turns: list[dict[str, Any]] = [
@@ -542,15 +590,26 @@ async def _run_all(task: Task, ws: Path, settings: Settings, provider: LLMProvid
             provider=provider,
             session_id=session_id,
             sessions=store,
+            mode="auto",  # unattended, like -y: nobody answers an ask, so asks are denies
         )
         events = read_events(run_dir / "events.jsonl")
+        started = [e for e in events if isinstance(e, ToolStartedEvent)]
+        denied_ids = {
+            e.tool_use_id for e in events if isinstance(e, ToolFinishedEvent) and e.denied
+        }
         record = RunRecord(
             goal=spec.goal,
             status=result.status,
             final_text=result.final_text,
-            tool_calls=tuple((e.name, e.input) for e in events if isinstance(e, ToolStartedEvent)),
+            tool_calls=tuple((e.name, e.input) for e in started),
             changed=diff_snapshots(before, snapshot(ws)),
             new_session=spec.new_session,
+            denied=frozenset(i for i, e in enumerate(started) if e.tool_use_id in denied_ids),
+            blocks=tuple(
+                (e.rule, e.kind, e.repeated)
+                for e in events
+                if isinstance(e, ToolPolicyEvent) and e.action == "deny"
+            ),
         )
         out.append(_Ran(result, run_dir, events, record))
         if result.status == "error":
@@ -664,6 +723,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 "tool_errors": sum(e.is_error for e in tools),
                 "plan": plan_metrics(events),
                 "memory": memory_metrics(events) if settings.memory else None,
+                "safety": safety_metrics(events),
                 "latency_s": round(sum(e.latency_ms for e in llm) / 1000, 2),
                 "wall_s": round(wall_s, 2),
                 "attempts": attempt,
@@ -675,6 +735,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                     "harness_sha": harness_sha(),
                     "effort": getattr(provider, "effort", settings.effort),
                     "memory": settings.memory,
+                    "policy": settings.policy,
                 },
             }
             if len(task.run_specs) > 1:
@@ -802,6 +863,24 @@ def _render_parts(rates: dict[str, tuple[int, int]]) -> str:
     return " · ".join(f"{name} {k}/{n}" for name, (k, n) in rates.items())
 
 
+def _safety_line(rows: list[dict[str, Any]]) -> str:
+    sf = [r["safety"] for r in rows]
+    errors: Counter[str] = Counter()
+    for x in sf:
+        errors.update(x["tool_errors"])
+    modes = sorted({f"{x['mode']}/{x['sandbox']}" for x in sf if x["policy"]}) or ["policy off"]
+    blocked = [x for x in sf if x["blocked"]]
+    rules = Counter(rule for x in sf for rule in x["blocked_rules"])
+    top = ", ".join(f"{rule} {n}" for rule, n in rules.most_common(4))
+    return (
+        f"- safety ({', '.join(modes)}): blocked calls in {len(blocked)}/{len(sf)} trials "
+        f"({sum(x['blocked'] for x in sf)} blocks, {sum(x['repeated'] for x in sf)} repeated, "
+        f"{sum(x['network_blocked'] for x in sf)} network){f' [{top}]' if top else ''} · "
+        f"model retries {sum(x['llm_retries'] for x in sf)} · tool errors "
+        + (", ".join(f"{k} {v}" for k, v in errors.most_common()) or "none")
+    )
+
+
 def summarize(variant_dir: Path) -> str:
     rows, errs = _load_rows(variant_dir)
     ok = [r for r in rows if r["status"] == "ok"]
@@ -860,6 +939,8 @@ def summarize(variant_dir: Path) -> str:
         )
     if planned := [r for r in ok if r.get("plan") is not None]:
         lines.append(_planning_line(planned))
+    if guarded := [r for r in ok if r.get("safety")]:
+        lines.append(_safety_line(guarded))
     if leaks := [r for r in ok if r["meta"].get("leak_suspect")]:
         lines.append(f"- WARNING: {len(leaks)} trial(s) touched eval files; inspect their traces")
     lines += ["", "| task | tags | passed | steps | reason (last rep) |", "|---|---|---|---|---|"]

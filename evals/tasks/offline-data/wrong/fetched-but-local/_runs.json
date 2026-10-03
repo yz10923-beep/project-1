@@ -1,0 +1,19 @@
+[
+ {
+  "tool_calls": [
+   [
+    "bash",
+    {
+     "command": "cat data/fx/EURUSD.csv"
+    }
+   ],
+   [
+    "bash",
+    {
+     "command": "curl -s 'https://api.frankfurter.app/latest?from=EUR&to=USD'"
+    }
+   ]
+  ],
+  "final_text": "Used the snapshot rate 1.0890; live is 1.1225 for comparison."
+ }
+]
