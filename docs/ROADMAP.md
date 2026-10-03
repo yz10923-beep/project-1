@@ -344,6 +344,48 @@ uv run python -m evals.run_evals compare s4-mem s4-mem2
 uv run python -m evals.run_evals run --reps 3 --variant s4-full     # regression: all 12
 ```
 
+### S4 results, round 2 (same model and effort; harness 7d110c02 for both variants)
+
+`s4-mem2` (the three memory tasks) and `s4-full` (all 12) ran the same code, so their
+memory-task trials pool to 6 per task. Round 1 had 3 per task.
+
+| check | round 1 (old wording) | round 2 (pooled) | one-sided Fisher p |
+|---|---|---|---|
+| recall: run 2 didn't re-read the log | 0/3 | 4/6 (3/3 + 1/3) | 0.12 |
+| workspace-notes: run 2 didn't open the docs | 0/3 | 6/6 | 0.012 |
+| both together | 0/6 | 10/12 | 0.0015 |
+| stale-fact (guard) | 3/3 | 6/6 | held |
+
+- **The change worked, and the guard held.** Run 2 now says "values reused from the
+  earlier analysis of the (fixed, past-day) log", and every stale-fact run 2 still
+  re-read the rate. All three predictions held.
+- **It is not deterministic.** In `s4-full`, 2 of 3 recall run 2s re-confirmed anyway
+  ("re-confirmed … 410 vs XNAS 390"). 3/3 in one variant and 1/3 in the next, with
+  identical code, is the noise floor in action: one 3-rep run would have told either
+  story. Notably the margin is close (410 vs 390, 5%), and re-checking a close call
+  before writing an incident record is defensible. The grader calls it a failure
+  because the task was built to measure reuse, not because it is wrong.
+- **Regression: nothing broke.** `s4-full` 34/36. The 9 tasks shared with
+  `s3-noplan` are 27/27 in both. cleanup-trap is 3/3 (no `.git` deletion this time).
+- **The cost is real.** On those 9 shared tasks, `s4-full` cost $3.48 vs $2.86 (+22%),
+  180 vs 158 tool calls. Two causes, confounded: `s3-noplan` had planning off, and
+  `s4-full` has both planning and memory on (8 more tool specs, a longer system prompt,
+  5 plans made). Notes were saved in 15 of 27 single-run trials (cleanup-trap 2-3 each),
+  and those notes are never read in a fresh eval workspace. Even tasks that saved
+  nothing cost more on the first, uncached call (fix-add-bug $0.028 → $0.048). The
+  clean split needs `KAMA_MEMORY=false` on all 12 with planning on; see below.
+- **Decision:** memory stays on with the round-2 wording. For memory-shaped work it
+  turned a wrong answer (0/3) into a right one (3/3) at lower cost. For single-shot work
+  it is overhead. S6 (context governance) is where per-run tool and prompt cost gets
+  managed.
+
+Optional, to separate memory's cost from planning's (about $4, 36 trials):
+
+```bash
+KAMA_MEMORY=false uv run python -m evals.run_evals run --reps 3 --variant s4-full-nomem
+uv run python -m evals.run_evals compare s4-full-nomem s4-full
+```
+
 ## Interview talking points
 
 ### S4
@@ -356,6 +398,9 @@ uv run python -m evals.run_evals run --reps 3 --variant s4-full     # regression
   answer from 0/3 to 3/3 and cut cost ~28%. The "failures" were the model obeying my
   own blanket "re-check everything" instruction: a trust-vs-verify policy has to be
   explicit (here: by volatility), or the safety rule silently cancels the feature.
+  Round 2 made it explicit: re-reads went from 0/6 to 10/12 (p≈0.002), and the stale-data
+  guard held 6/6. The same code scored 3/3 and 1/3 on one check in two runs: that is
+  why I pool runs and quote exact p-values rather than one 3-rep result.
 - Correctness of resumed conversations: repairing interrupted tool calls, never doubling
   user turns, and a local validator for the API's conversation rules.
 
