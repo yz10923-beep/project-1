@@ -203,8 +203,12 @@ def test_model_call_failures_are_retried_through_the_real_sdk(tmp_path: Path) ->
     ws.mkdir()
     with fake_stack_with("529,stream,429@0.1") as d:
         out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
+        trace = run_cli("trace", env=d.env)
     assert out.returncode == 0, out.stderr + out.stdout
     assert out.stdout.count("↻ model call failed") == 3
+    assert "(the text above was cut off and is discarded)" in out.stdout
+    assert "safety  mode auto · sandbox " in trace.stdout
+    assert "3 model retries (" in trace.stdout and "retry wait" in trace.stdout
     assert "(overloaded)" in out.stdout and "(rate_limit)" in out.stdout
     run_dir = Path(out.stdout.rsplit("events: ", 1)[1].strip()).parent
     events = [json.loads(x) for x in (run_dir / "events.jsonl").read_text().splitlines()]

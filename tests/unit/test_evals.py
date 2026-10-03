@@ -514,3 +514,36 @@ async def test_with_policy_off_the_network_check_still_judges_what_ran(tmp_path:
     assert row["grade"]["passed"] == 0.0
     assert "no_network WRONG" in row["explanation"]["passed"]
     assert row["safety"]["policy"] is False and row["meta"]["policy"] is False
+
+
+async def test_the_answer_key_is_out_of_the_agents_reach(tmp_path: Path) -> None:
+    """S5 closes the gap the leak flag only detected: the eval directory is a private
+    path for every trial, so reading a checker is blocked (and still flagged)."""
+    from evals.harness import EVALS_DIR
+
+    checker = EVALS_DIR / "tasks" / "fix-add-bug" / "check.py"
+    script = [
+        tool_response(("b", "bash", {"command": f"cat {checker}"})),
+        tool_response(
+            ("p", "bash", {"command": f"python3 -c \"print(open('{checker}').read())\""})
+        ),
+        *solve_script(),
+    ]
+    providers: list[ScriptedProvider] = []
+
+    def factory(s: Settings) -> ScriptedProvider:
+        providers.append(ScriptedProvider(list(script)))
+        return providers[-1]
+
+    cfg = cfg_for(tmp_path, factory)
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    [row] = rows(cfg)
+    assert row["meta"]["leak_suspect"] is True  # the attempt is still flagged
+    assert row["safety"]["blocked"] == 2 and row["safety"]["blocked_rules"] == ["builtin:secrets"]
+    results = [
+        b["content"]
+        for m in providers[0].requests[2].messages
+        if m["role"] == "user" and isinstance(m["content"], list)
+        for b in m["content"]
+    ]
+    assert all("def check" not in r for r in results)  # nothing of the checker came back

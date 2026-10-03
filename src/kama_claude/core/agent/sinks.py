@@ -124,9 +124,12 @@ class ConsolePrinter:
                 again = " (again)" if event.repeated else ""
                 self._p(f"  ✋ blocked{again} by {event.rule}: {event.reason}")
             case LLMRetryEvent():
+                cut = " (the text above was cut off and is discarded)" * (
+                    event.step in self._streamed_steps
+                )
                 self._p(
-                    f"  ↻ model call failed ({event.kind}); retrying in {event.wait_s:.1f}s "
-                    f"(attempt {event.attempt + 1})"
+                    f"  ↻ model call failed ({event.kind}){cut}; retrying in "
+                    f"{event.wait_s:.1f}s (attempt {event.attempt + 1})"
                 )
                 self._streamed_steps.discard(event.step)  # its streamed text is void
             case LLMResponseEvent():

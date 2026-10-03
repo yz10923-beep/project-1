@@ -135,7 +135,7 @@ class Bash(Tool[BashParams]):
     async def run(self, params: BashParams, ctx: ToolContext) -> ToolResult:
         sandbox = ctx.sandbox or Sandbox("none")
         proc = await asyncio.create_subprocess_exec(
-            *sandbox.argv(params.command, ctx.workspace, network=ctx.network),
+            *sandbox.argv(params.command, ctx.workspace, network=ctx.network, hidden=ctx.hidden),
             cwd=ctx.workspace,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,

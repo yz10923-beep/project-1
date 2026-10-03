@@ -92,18 +92,25 @@ def note_store(settings: Settings) -> NoteStore | None:
     return NoteStore(settings.memory_dir) if settings.memory else None
 
 
-def daemon_paths(settings: Settings) -> tuple[Path, ...]:
-    """The daemon's own files and dirs, which no tool call may read or change."""
+def private_paths(settings: Settings) -> tuple[Path, ...]:
+    """Extra paths from KAMA_PRIVATE_PATHS (e.g. the eval graders)."""
     return tuple(
-        p.expanduser()
-        for p in (
-            settings.runs_dir,
-            settings.sessions_dir,
-            settings.memory_dir,
-            settings.token_file,
-            settings.policy_file,
-        )
-        if p.expanduser().is_absolute()
+        Path(p.strip()).expanduser() for p in settings.private_paths.split(",") if p.strip()
+    )
+
+
+def daemon_paths(settings: Settings) -> tuple[Path, ...]:
+    """The daemon's own files and dirs, plus KAMA_PRIVATE_PATHS: no tool call may read or
+    change them."""
+    own = (
+        settings.runs_dir,
+        settings.sessions_dir,
+        settings.memory_dir,
+        settings.token_file,
+        settings.policy_file,
+    )
+    return tuple(p.expanduser() for p in own if p.expanduser().is_absolute()) + private_paths(
+        settings
     )
 
 
@@ -167,6 +174,7 @@ def build_loop(
         retry=retry_policy(settings),
         on_remember=on_remember,
         env_keep=keep,
+        hidden=private_paths(settings),
     )
 
 

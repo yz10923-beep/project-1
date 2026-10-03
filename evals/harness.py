@@ -628,6 +628,11 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
             if events_dir.exists():
                 shutil.rmtree(events_dir)  # left over from an interrupted earlier run
             overrides: dict[str, Any] = {
+                # the graders and answers: no tool call may read them (S5), and bwrap
+                # hides them from bash entirely
+                "private_paths": ",".join(
+                    filter(None, [str(EVALS_DIR.resolve()), cfg.settings.private_paths])
+                ),
                 "runs_dir": events_dir,
                 # per trial: notes and sessions must never leak between trials
                 "sessions_dir": events_dir / "sessions",

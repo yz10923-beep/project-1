@@ -278,9 +278,12 @@ class RunManager:
                 on_remember=remember,
             )
         except BaseException:
+            # e.g. a broken policy file: the run never started, so it must not stay
+            # "running" in its session or keep the session reserved.
             writer.close()
             if session_id is not None:
                 self._active.pop(session_id, None)
+                await asyncio.to_thread(self.sessions.finish_run, session_id, run_id, "error")
             raise
 
         async def drive() -> RunResult:

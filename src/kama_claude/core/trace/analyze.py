@@ -71,11 +71,20 @@ class TraceSummary:
     memory_notes: int = 0
     memory_chars: int = 0
     notes_changed: int = 0
+    # S5: what the policy decided and how long the run waited out model-call failures
+    policy_mode: str | None = None
+    sandbox: str | None = None
+    blocked: int = 0
+    repeat_blocked: int = 0
+    asked: int = 0
+    retries: int = 0
+    backoff_ms: float = 0.0
 
     @property
     def other_ms(self) -> float:
         """Loop overhead: event writes, prompt building, scheduling."""
-        return max(0.0, self.wall_ms - self.llm_ms - self.tool_ms - self.approval_ms)
+        busy = self.llm_ms + self.tool_ms + self.approval_ms + self.backoff_ms
+        return max(0.0, self.wall_ms - busy)
 
     @property
     def cache_hit_ratio(self) -> float | None:
@@ -105,12 +114,20 @@ def summarize(spans: list[Span]) -> TraceSummary:
     summary.memory_notes = int(run.attrs.get("memory_notes", 0))
     summary.memory_chars = int(run.attrs.get("memory_chars", 0))
     summary.notes_changed = int(run.attrs.get("notes_changed", 0))
+    summary.policy_mode = run.attrs.get("policy_mode")
+    summary.sandbox = run.attrs.get("sandbox")
+    summary.blocked = int(run.attrs.get("policy_denials", 0))
+    summary.repeat_blocked = int(run.attrs.get("repeat_denials", 0))
+    summary.asked = int(run.attrs.get("approvals_asked", 0))
     if "plan_tasks" in run.attrs:
         summary.plan = {
             k.removeprefix("plan_"): int(v) for k, v in run.attrs.items() if k.startswith("plan_")
         }
     for s in spans:
-        if s.kind == "llm":
+        if s.name == "llm.backoff":  # waiting before a retry, not model time
+            summary.backoff_ms += s.duration_ms
+            summary.retries += 1
+        elif s.kind == "llm":
             summary.llm_ms += s.duration_ms
             for k in _TOKEN_KEYS:
                 summary.tokens[k] += int(s.attrs.get(k, 0))
@@ -154,7 +171,7 @@ def summarize(spans: list[Span]) -> TraceSummary:
         if s.name.startswith("step ") and names and all(n in PLAN_TOOL_NAMES for n in names):
             summary.plan_only_steps += 1
             summary.plan_only_ms += s.duration_ms
-    work = [s for s in spans if s.kind == "llm" or s.name == "tool.exec"]
+    work = [s for s in spans if s.name == "llm.call" or s.name == "tool.exec"]
     summary.slowest = sorted(work, key=lambda s: s.duration_ns, reverse=True)[:3]
 
     by_method: dict[str, list[float]] = defaultdict(list)
@@ -202,9 +219,10 @@ def render(spans: list[Span], width: int = 40) -> str:
         ("model", s.llm_ms),
         ("tools", s.tool_ms),
         ("approval", s.approval_ms),
+        *([("retry wait", s.backoff_ms)] if s.backoff_ms else []),
         ("other", s.other_ms),
     ):
-        lines.append(f"  {label:<9}{_fmt_s(ms):>8} {ms / wall:>5.0%}  {_bar(ms / wall)}")
+        lines.append(f"  {label:<10}{_fmt_s(ms):>7} {ms / wall:>5.0%}  {_bar(ms / wall)}")
 
     t = s.tokens
     hit = f"{s.cache_hit_ratio:.0%}" if s.cache_hit_ratio is not None else "n/a"
@@ -245,6 +263,16 @@ def render(spans: list[Span], width: int = 40) -> str:
             f"memory  {where} · {s.memory_notes} note(s) sent "
             f"(~{s.memory_chars // 4} tokens) · {s.notes_changed} note change(s)"
         )
+    if s.policy_mode or s.retries:
+        bits = [f"mode {s.policy_mode} · sandbox {s.sandbox}" if s.policy_mode else "policy off"]
+        if s.blocked:
+            again = f" ({s.repeat_blocked} repeated)" if s.repeat_blocked else ""
+            bits.append(f"{s.blocked} call(s) blocked{again}")
+        if s.asked:
+            bits.append(f"{s.asked} asked")
+        if s.retries:
+            bits.append(f"{s.retries} model retries ({_fmt_s(s.backoff_ms)} waiting)")
+        lines.append("safety  " + " · ".join(bits))
     lines += ["", "timeline" + " " * 21 + "|" + "-" * width + "|"]
     run_start = min(x.start_ns for x in spans if x.name == "run")
     depths = _depths(spans)

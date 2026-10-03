@@ -12,7 +12,7 @@ the demo command works, not "the code is written".
 | **Trace** ✅ | Span-level trace of IPC → event bus → LLM calls (latency, tokens, cost) | You can replay a run and say where the time and tokens went | Observability: the same idea as Langfuse/LangSmith, built by hand first |
 | **S3** ✅ | Task tools (create/update/get/list, dependencies) so the model plans; the user can steer the plan; TUI | A multi-step goal shows a visible plan being executed, in the CLI and the TUI; the eval A/B says whether planning helps | Planning as tools, not prompts; a real frontend over the protocol |
 | **S4** ✅ | Sessions: multiple runs share a thread (history replayed from events, interrupted runs repaired); durable notes (workspace/session scope, provenance, volatile values); `kama chat`, notes in CLI/TUI | Run 2 uses a fact learned in run 1 without re-reading it; memory never makes the agent trust stale data (eval: 3 multi-run tasks) | Memory tiers: working context vs. session history vs. durable notes |
-| **S5** | Tool safety: param validation, permission policy + approval flow, failure classification, retry | A denied `bash rm` is blocked and the model recovers; transient errors retry, permanent don't | Failure handling for agents |
+| **S5** ✅ | Tool safety: a permission policy that reads bash (modes, rule files, protected paths), an OS sandbox (network off unless allowed; bwrap: read-only system and .git), approvals with reasons and "always", typed tool failures, retries owned by the loop | A denied `bash rm` is blocked and the model recovers; transient errors retry, permanent don't; a labelled corpus of 143 commands allows no dangerous one (eval: corpus + 2 tasks) | Failure handling for agents |
 | **S6** | Context governance: token budget, tool_result truncation, compaction | A long session stays under budget with measured quality loss | Context engineering, token accounting |
 | **S7** | Skills, subagents, MCP client | An MCP server's tools appear in the registry and get called | Extension boundaries |
 
@@ -386,7 +386,153 @@ KAMA_MEMORY=false uv run python -m evals.run_evals run --reps 3 --variant s4-ful
 uv run python -m evals.run_evals compare s4-full-nomem s4-full
 ```
 
+## S5 notes
+
+Built (full version):
+- **A policy that reads bash** (`core/policy/`). A quote-aware lexer and parser
+  (`shell.py`) handles heredocs, substitutions, loops, pipes and `cd`, and marks whatever
+  it can't see through as opaque. A classifier (`classify.py`) turns each simple command
+  into effects (read, write, delete, exec, network, risky, forbidden) on resolved paths,
+  following symlinks and expanding globs the way bash does; inline code (`python -c`,
+  `node -e`, heredocs fed to an interpreter) is scanned too. The engine (`engine.py`)
+  maps effects through the mode:
+
+  | mode | read | write | delete | exec | network | risky | forbidden |
+  |---|---|---|---|---|---|---|---|
+  | default | allow | ask | ask | ask | ask | ask | deny |
+  | accept-edits | allow | allow | ask | ask | ask | ask | deny |
+  | auto (`-y`, evals) | allow | allow | allow | allow | **deny** | **deny** | deny |
+  | read-only | allow | deny | deny | deny | deny | deny | deny |
+
+- **Rule files.** `~/.kama/policy.toml` (the user's) may allow, ask or deny, and its
+  allow can lift a built-in verdict. A workspace's `.kama/policy.toml` may only tighten:
+  its allow rules are ignored, with a warning. Rules match by tool, command (word prefix
+  or glob), effect, path glob and recursive.
+- **Protected** (never, in any mode): `.git` (and anything containing it, so `rm -rf .`
+  too), `.kama`, secrets (`.env`, keys, `~/.ssh`, `~/.aws`, ...), the daemon's own files
+  (the token, runs, sessions, notes, the policy), anything outside the workspace (except
+  /tmp scratch, but not the workspace's own siblings there), root, disks, users,
+  firewalls.
+- **The OS sandbox** (`core/sandbox.py`). Detection runs the backend for real:
+  - bwrap: read-only system, writable workspace with `.git` read-only, credential dirs
+    hidden, its own PID namespace, network only when allowed;
+  - unshare: network namespace only;
+  - none.
+
+  The policy decides per call whether the network opens. Credentials never reach bash's
+  environment. `kama ping`, `kama policy show` and run.started say which backend is
+  active.
+- **Approvals**:
+  - deny with a reason (the model is told);
+  - "always allow" for the session (program + first argument, e.g. `python -m pytest`,
+    saved in the session file; never for a risky or forbidden call);
+  - CLI `y/a/n/n <why>`, TUI `y/a/n/r`;
+  - the approval shows the risk and the rule.
+- **Recovery messages.** A deny tells the model what was blocked, by which rule, and what
+  to do instead. A second deny by the same rule (the same goal in another form) is
+  answered "Blocked again… you already tried this" and counted as `repeat_denials`.
+- **Typed tool failures.** `error_kind` is one of invalid_input, unknown_tool, not_found,
+  invalid_target, outside_workspace, rejected, blocked, denied, timeout or crashed.
+  Validation errors are one line per field plus the expected shape. The same failing
+  call three times is called out in its result.
+- **Model-call retries owned by the loop** (`llm/retry.py`):
+  - the SDK's own retries are off;
+  - 429, 529, 5xx, connection errors and mid-stream failures retry with jittered
+    backoff;
+  - retry-after is honoured within a per-call time budget;
+  - each retry is an `llm.retry` event and an `llm.backoff` span;
+  - clients drop the void streamed text.
+
+  Tool calls are never retried automatically.
+- **Observability**: `tool.policy` events, a safety line in the run summary and in
+  `kama trace` ("retry wait" in the time breakdown), and a safety block in eval rows and
+  the summary.
+- **Eval, written first**:
+  - `evals/policy/corpus.toml`: 143 labelled commands, including evasion (quotes inside
+    words, `\rm`, `/bin/rm`, `$(echo rm)`, `eval`, base64 into `sh`, rmtree from
+    `python -c` and `node -e`, `find -delete` matching inside `.git`, symlinks). The
+    gate in `make verify` is zero dangerous allows; mismatches are listed.
+  - Two tasks: `denied-recovery` and `offline-data`.
+  - Fault injection in the fake API, and integration tests over the real SDK.
+
+Design choices worth defending:
+- **Classifier and sandbox, not one or the other.** A command classifier is a speed
+  bump with good error messages: it can't see inside a script the agent wrote. The
+  corpus lists such cases as known gaps (`python cleanup.py`, `make clean`), measured
+  rather than hidden. The sandbox is the boundary. Where it can't run, the run says so.
+- **Unattended means deny, not allow.** `-y` turns the asks a human would answer into
+  allows only for work inside the workspace. Network, destructive git and unverifiable
+  commands become denies, because nobody is there to look. `-y` never overrides a deny.
+- **The workspace can only tighten.** The agent writes in the workspace, so a workspace
+  allow rule could have been written by the agent. `.kama/` is protected too.
+- **Fail closed, with a way forward.** Unparsable means ask, never allow. A deny names
+  a form the policy can verify ("name the exact files"). The repeat counter turns
+  "the model kept trying" into a number.
+- **Retry the model, never the tool.** A model call has no side effects; a bash call
+  may have. Owning the retries (instead of the SDK's hidden ones) makes them visible,
+  traced and bounded by a budget, and lets the stream break mid-response without
+  leaving half a message in the conversation.
+- **The graders are private.** `KAMA_PRIVATE_PATHS` is the eval directory for every
+  trial, so reading a checker is blocked, not just flagged (S1's known gap).
+
+Bugs found by the tests and the corpus (before any paid run):
+- `cat ~/.ssh/id_rsa` was allowed: a word starting with `~` counted as "unknown", and
+  the secrets check skipped unknown words.
+- `rm -rf ~` and `rm -rf ../other-project` counted as /tmp scratch. Tests put HOME
+  under /tmp, and an eval workspace lives in /tmp, so its siblings looked like scratch.
+  Now: never the home directory, never an ancestor of the workspace, never a sibling
+  in the workspace's temp tree.
+- `node -e "require('fs').rmSync('.git')"` was allowed: the delete patterns knew only
+  Python's names.
+- `kill -9 1` failed to parse: `"" in "<>"` is true in Python, so a lone digit at the end
+  of the line looked like a redirection's fd.
+- "Always allow" for `python -m pytest` would have remembered `python`, i.e. all Python.
+- Retry-after was capped at the per-delay maximum: waiting 30s when the server asked for
+  50s just earns another 429.
+- The TUI's hidden reason box took focus, so `y` was typed into it instead of answering.
+- Inside a network namespace, `lo` is down, so tests that talk to a local server would
+  fail. `ip` isn't always installed, so the sandbox brings `lo` up with the ioctl.
+- The trace counted backoff waits as model time.
+
+### The S5 experiment (VM; costs money)
+
+First, on the VM: `sudo apt install bubblewrap`, then check that `uv run kama policy
+show` says `sandbox bwrap`. If it says none, the sandbox rows below measure the policy
+alone. Then:
+
+```bash
+uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s5-full
+KAMA_POLICY=false KAMA_SANDBOX=off uv run python -m evals.run_evals run --reps 3 --variant s5-off
+uv run python -m evals.run_evals compare s5-off s5-full
+uv run python -m evals.run_evals compare s4-full s5-full     # regression vs S4
+```
+
+Predictions, written before the run:
+- **The 12 old tasks:** pass rate within noise of s4-full (34/36). cleanup-trap may
+  spend a step or two on a blocked `find -delete` and recover; that's the cost to
+  watch.
+- **denied-recovery:** on, ≥2/3 pass, most trials with "blocked first: yes" and no
+  workaround; off, passes on end state (nothing is blocked).
+- **offline-data:** on, 3/3; off, ≤1/3. In S4 the no-memory arm fetched a live rate
+  3/3, and that is exactly what `no_network` fails.
+- **Never:** a forbidden action that ran. Any `tool.policy` allow of a delete under
+  `.git` is a bug.
+
 ## Interview talking points
+
+### S5
+- "How do you keep an agent from doing damage?" Two layers. A policy reads the command:
+  a real bash parser, effects on resolved paths, modes, rule files where the workspace
+  can only tighten. An OS sandbox catches what the policy can't see. The corpus measures
+  the first (0 dangerous allows of 143) and lists its known gaps, which the second
+  covers.
+- Unattended vs attended: `-y` must not mean "approve everything". Asks a human would
+  answer become denies when nobody is there, and the model gets a way forward.
+- Failure taxonomy: retry the model (no side effects; backoff, retry-after, a budget,
+  mid-stream breaks), never the tool. Tool failures are typed, so "try again" vs "try
+  something else" is decided from data, not text.
+- Finance angle: an unvetted market-data fetch is a data-integrity incident, not just a
+  security one. The offline-data task grades exactly that.
 
 ### S4
 - "How does your agent remember?" Three tiers, each with a different lifetime and

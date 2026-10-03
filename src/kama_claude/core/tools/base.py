@@ -24,6 +24,7 @@ class ToolContext:
     sandbox: Sandbox | None = None
     network: bool = True
     env_keep: frozenset[str] = frozenset()
+    hidden: tuple[Path, ...] = ()  # private paths the sandbox hides from bash (if it can)
 
 
 @dataclass(frozen=True)

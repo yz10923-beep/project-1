@@ -77,7 +77,9 @@ class Sandbox:
         }[self.backend]
         return what + (f" ({self.note})" if self.note else "")
 
-    def argv(self, command: str, workspace: Path, *, network: bool) -> list[str]:
+    def argv(
+        self, command: str, workspace: Path, *, network: bool, hidden: tuple[Path, ...] = ()
+    ) -> list[str]:
         """The argv that runs `command` with bash inside this sandbox."""
         inner = ["bash", "-c", command]
         if self.backend == "none":
@@ -89,10 +91,10 @@ class Sandbox:
             # (tests that talk to a local server still work); files keep the real owner.
             up = f"{shlex.quote(sys.executable)} -S -I -c {shlex.quote(_LO_UP)} 2>/dev/null"
             return ["unshare", "-rn", "sh", "-c", f'{up}; exec "$@"', "sh", *inner]
-        return [*bwrap_args(workspace, network=network), "--", *inner]
+        return [*bwrap_args(workspace, network=network, hidden=hidden), "--", *inner]
 
 
-def bwrap_args(workspace: Path, *, network: bool) -> list[str]:
+def bwrap_args(workspace: Path, *, network: bool, hidden: tuple[Path, ...] = ()) -> list[str]:
     ws = str(workspace.resolve())
     home = Path(os.path.expanduser("~")).resolve()
     args = [
@@ -120,6 +122,11 @@ def bwrap_args(workspace: Path, *, network: bool) -> list[str]:
             args += ["--tmpfs", str(p)]
         elif p.exists():
             args += ["--ro-bind", "/dev/null", str(p)]
+    for p in hidden:
+        if p.is_dir():
+            args += ["--tmpfs", str(p.resolve())]
+        elif p.exists():
+            args += ["--ro-bind", "/dev/null", str(p.resolve())]
     args += ["--bind", ws, ws]
     for name in (".git", ".kama"):
         if (workspace / name).exists():

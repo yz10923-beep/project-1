@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S4 done (full version; memory A/B complete) → S5 next**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (full version; safety A/B pending) → S6 next**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -87,6 +87,8 @@ uv run kama tui [RUN_ID] [-w DIR] [-y] [--session ID]   # full-screen UI (also: 
 uv run kama chat [-w DIR] [-y] [--session ID]    # a conversation: each line a run in one session
 uv run kama run --new-session|--session ID "..."  # runs that share a conversation
 uv run kama session list|show ID · kama notes list|add|edit|rm   # sessions; the agent's memory
+uv run kama run --mode default|accept-edits|auto|read-only "..."   # permission mode; -y = auto
+uv run kama policy show [-w DIR] · kama policy check "rm -rf build"   # what the policy decides, why
 uv run kama run --local "..."         # in-process, no daemon (S1 behaviour)
 uv run kama trace [RUN_ID]            # where a run's time/tokens/cost went (default: latest)
 uv run kama trace RUN_ID --chrome t.json   # open in https://ui.perfetto.dev
@@ -98,6 +100,7 @@ make evals-selftest                        # graders vs oracle / null / wrong so
 uv run python -m evals.run_evals run --reps 3 [--variant v1] [--tasks a,b]   # paid
 uv run python -m evals.run_evals summary [--variant v1]
 uv run python -m evals.run_evals compare v1 v2   # A/B per task and sub-check
+uv run python -m evals.policy_eval [-v]       # the policy's labelled command corpus; free
 ```
 
 Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the API key in
@@ -107,7 +110,11 @@ Agent settings (priority low→high: `~/.kama/.env`, `./.env`, env vars; put the
 false = no task_* tools, the S2 agent, for A/B runs), `KAMA_MEMORY` (true; false = no session
 history and no notes, the S3 agent), `KAMA_SESSIONS_DIR` (`~/.kama/sessions`), `KAMA_MEMORY_DIR`
 (`~/.kama/memory`), `KAMA_RUNS_DIR` (`~/.kama/runs`),
-`KAMA_TOKEN_FILE` (`~/.kama/core.token`), `KAMA_APPROVAL_TIMEOUT_S` (600).
+`KAMA_TOKEN_FILE` (`~/.kama/core.token`), `KAMA_APPROVAL_TIMEOUT_S` (600), `KAMA_POLICY` (true;
+false = the S4 approvals: ask for bash/write_file, -y approves all), `KAMA_POLICY_FILE`
+(`~/.kama/policy.toml`), `KAMA_SANDBOX` (auto | bwrap | unshare | off), `KAMA_BASH_ENV_KEEP`
+(credential-looking env vars to keep for bash), `KAMA_PRIVATE_PATHS` (more paths no tool may
+touch), `KAMA_LLM_MAX_RETRIES` (4), `KAMA_LLM_RETRY_BUDGET_S` (120).
 
 ### Layout
 
@@ -125,6 +132,12 @@ src/kama_claude/
     llm/types.py         LLMProvider protocol, LLMResponse (raw blocks + parsed views), Usage
     llm/anthropic_provider.py  Messages API via raw SDK (streamed); TTFT; errors; caching
     llm/pricing.py       one price table; cost_usd(model, usage) (None if unpriced)
+    llm/retry.py         RetryPolicy: which model-call failures retry, backoff, retry-after, budget
+    policy/shell.py      quote-aware bash lexer/parser: simple commands, redirects, opaque parts
+    policy/classify.py   effects of a command (read/write/delete/exec/network/risky/forbidden)
+    policy/paths.py      where a path points: inside, protected, outside, secret, scratch
+    policy/engine.py     Policy: modes, rule files (user allows, workspace only tightens), Decision
+    sandbox.py           bwrap / unshare / none, probed for real; bash argv; scrubbed env
     plan.py              Plan (a run's task DAG: add/update/render), PlanTask, statuses
     session.py           SessionStore: a session = its runs in order; history replayed from events
     notes.py             NoteStore (workspace/session scope), NoteBook, memory_preamble()
@@ -152,6 +165,7 @@ tests/unit/              protocol, config, server, tools, loop, plan, provider (
 tests/integration/       real daemon + CLI subprocesses (+ the TUI and sessions via the fake API)
 tests/live/              real API; deselected by default
 evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
+evals/policy_eval.py     the policy corpus (evals/policy/corpus.toml): 0 dangerous allows, gaps listed
 evals/run_evals.py       CLI: list / selftest / run / summary; harness-approval gate
 evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ + wrong/*/ + [alt/*/]
                          (log-error-triage is the reference task; `_delete.txt` in a solution deletes;
@@ -231,6 +245,18 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   system prompt), framed as past observations, not instructions. No notes and no history
   = no block (request unchanged). KAMA_MEMORY=false = the S3 agent, byte for byte.
 - Tests never touch the real home directory: an autouse fixture sets HOME per test.
+- Every tool call goes through the policy before any approver: deny never reaches a human,
+  ask does, allow runs. `-y` (auto) never overrides a deny, and an ask nobody can answer
+  is a deny. A workspace policy file can only tighten; `.kama/`, `.git`, secrets and the
+  daemon's own files are never writable (or, for secrets and daemon files, readable).
+- Anything the bash parser can't see through is opaque: ask (or deny unattended when it
+  looks destructive), never allow. The corpus gate (`evals/policy`) is zero dangerous
+  allows; a known gap is listed in the corpus, not hidden.
+- bash runs in the probed sandbox with network only when the call's decision allows it,
+  and with credential-looking variables removed from its environment.
+- Model calls are retried by the loop (SDK retries off): retryable kinds only, with
+  backoff, retry-after and a budget, each one an llm.retry event. Tool calls are never
+  retried automatically. Every failed tool result has an error_kind.
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

@@ -54,6 +54,9 @@ class Settings(BaseModel):
     sandbox: Literal["auto", "bwrap", "unshare", "off"] = "auto"
     # Environment variables kept for bash although they look like credentials (comma list).
     bash_env_keep: str = ""
+    # More paths no tool call may read or change, like the daemon's own files (comma
+    # list). The eval harness puts its graders here; bwrap also hides them from bash.
+    private_paths: str = ""
     # Model calls that fail with a retryable error (429, 529, 5xx, network) are retried
     # with backoff, up to this many times and this much total waiting per call.
     llm_max_retries: int = Field(default=4, ge=0, le=20)

@@ -208,13 +208,14 @@ class AgentLoop:
         retry: RetryPolicy = NO_RETRY,
         on_remember: RememberRules | None = None,
         env_keep: frozenset[str] = frozenset(),
+        hidden: tuple[Path, ...] = (),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._sink = sink
         self._base_ctx = ToolContext(
-            workspace=workspace.resolve(), sandbox=sandbox, env_keep=env_keep
+            workspace=workspace.resolve(), sandbox=sandbox, env_keep=env_keep, hidden=hidden
         )
         self._ctx = self._base_ctx
         # S5: None = the S4 approvals (ask for every requires_approval tool).
@@ -269,6 +270,12 @@ class AgentLoop:
                 memory_notes=(preamble or "").count("\n- ["),
                 memory_chars=len(preamble or ""),
                 notes_changed=self._state.notes_changed,
+                policy_mode=self._policy.mode if self._policy else None,
+                sandbox=(self._sandbox or Sandbox("none")).backend if self._policy else None,
+                policy_denials=self._state.policy_denials,
+                repeat_denials=self._state.repeat_denials,
+                approvals_asked=self._state.approvals_asked,
+                llm_retries=self._state.llm_retries,
             )
             if self._planning:
                 counts = self._ctx.plan.counts()

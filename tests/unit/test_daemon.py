@@ -663,3 +663,28 @@ async def test_notes_commands_say_when_memory_is_off(daemon_factory: Any) -> Non
         with pytest.raises(RpcError) as exc:
             await c.call(NOTES_LIST, NotesListParams(workspace=str(d.ws)), NotesListResult)
         assert "memory is off" in exc.value.message
+
+
+async def test_a_broken_policy_file_rejects_the_run_and_frees_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kama_claude.core.agent.manager import RunManager
+    from kama_claude.core.policy.engine import PolicyFileError
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (tmp_path / "policy.toml").write_text('[[rules]]\naction = "sometimes"\n')
+    mgr = RunManager(
+        Settings(
+            runs_dir=tmp_path / "runs",
+            sessions_dir=tmp_path / "sessions",
+            policy_file=tmp_path / "policy.toml",
+            sandbox="off",
+        ),
+        provider_factory=lambda s: ScriptedProvider([text_response("x")]),
+    )
+    with pytest.raises(PolicyFileError):
+        await mgr.start("go", ws, auto_approve=True, new_session=True)
+    [info] = mgr.sessions.list_sessions()
+    assert [r.status for r in info.runs] == ["error"]
+    assert mgr.active_run(info.session_id) is None

@@ -4,7 +4,7 @@ A mini local coding-agent runtime in Python, built stage by stage after
 [KamaClaude](https://github.com/youngyangyang04/KamaClaude) (MIT). A `kama-core` daemon
 owns agent state; the `kama` CLI talks to it over JSON-RPC 2.0 / NDJSON on TCP.
 
-Status: **S4**. Runs execute in the `kama-core` daemon; `kama run` / `attach` stream them live over JSON-RPC, and any client can answer approval prompts. The agent plans with task tools (you can steer the plan), remembers across runs (sessions and durable notes), and every run is traced (`kama trace`). See [docs/ROADMAP.md](docs/ROADMAP.md).
+Status: **S5**. Runs execute in the `kama-core` daemon; `kama run` / `attach` stream them live over JSON-RPC, and any client can answer approval prompts. The agent plans with task tools (you can steer the plan), remembers across runs (sessions and durable notes), and every tool call goes through a permission policy that reads bash, with bash itself in an OS sandbox (`kama policy check "rm -rf .git"`). Model-call failures are retried visibly, and every run is traced (`kama trace`). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ```bash
 uv sync
