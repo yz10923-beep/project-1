@@ -18,6 +18,7 @@ from evals.harness import (
     RunConfig,
     SuiteAborted,
     compare,
+    git_info,
     harness_sha,
     load_tasks,
     run_suite,
@@ -100,6 +101,18 @@ def main() -> None:
     if settings.anthropic_api_key is None:
         raise SystemExit("no ANTHROPIC_API_KEY (env, ./.env or ~/.kama/.env)")
     effort = settings.effort if supports_effort(settings.model) else None
+    git = git_info()
+    print(
+        "code: "
+        + (
+            f"{git['branch']} @ {git['commit']}"
+            + (" (uncommitted changes)" if git["dirty"] else "")
+            if git
+            else "not a git checkout"
+        )
+        + f" · harness {harness_sha()[:12]} · context "
+        + (f"on (budget {settings.context_budget})" if settings.context else "off")
+    )
     print(
         f"running {len(tasks)} tasks × {args.reps} reps on {settings.model} "
         f"(effort={effort or 'API default'}) "
@@ -117,8 +130,7 @@ def main() -> None:
         asyncio.run(run_suite(tasks, cfg))
     except SuiteAborted as e:
         raise SystemExit(
-            f"\nABORTED: a request error will repeat on every trial, so the run stopped.\n{e}\n"
-            "Fix the configuration, then re-run the same command (scored trials are kept)."
+            f"\nABORTED: {e}\nFix the cause, then re-run the same command (scored trials are kept)."
         ) from e
     print()
     print(summarize(cfg.variant_dir))

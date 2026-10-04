@@ -161,6 +161,30 @@ def test_log_triage_fixture_is_frozen() -> None:
     assert setup.log_sha256() == LOG_TRIAGE_SHA
 
 
+BIG_LOG_SHA = "73d8bb8fb715a1b91f6c43907fa8cc10b05740e9063b687b4aaa351d1207b919"
+
+
+def test_big_log_triage_log_is_frozen() -> None:
+    from evals.harness import TASKS_DIR, load_task_module
+
+    setup = load_task_module(TASKS_DIR / "big-log-triage", "setup")
+    assert setup.log_sha256() == BIG_LOG_SHA
+    assert setup.truth() == {
+        "start": "2024-03-15T13:47:05.312Z",
+        "dependency": "margin-calc",
+        "rejected": 2847,
+    }
+
+
+def test_long_session_inputs_are_frozen() -> None:
+    from evals.harness import TASKS_DIR, load_task_module
+
+    setup = load_task_module(TASKS_DIR / "long-session-recall", "setup")
+    assert (
+        setup.inputs_sha256() == "09121bb3234bc6abca076b0f2c99e464a8671d1df0b508c6dc8506f5148b7e56"
+    )
+
+
 async def test_setup_hook_generates_inputs_for_each_trial(tmp_path: Path) -> None:
     answer = json.loads((Path("evals/tasks/log-error-triage/oracle/answer.json")).read_text())
     script: list[LLMResponse | LLMError] = [
@@ -215,6 +239,44 @@ async def test_a_mixed_variant_is_flagged_and_not_resumed(tmp_path: Path) -> Non
     assert "MIXED CONDITIONS, not one variant: sandbox:" in summarize(cfg.variant_dir)
     with pytest.raises(SuiteAborted, match="already mixes conditions"):
         await run_suite(load_tasks(["fix-add-bug"]), cfg_for(tmp_path, None, reps=3))
+
+
+async def test_an_overflowed_trial_is_scored_not_an_infra_error(tmp_path: Path) -> None:
+    """S6: a history that outgrew the window is the agent's failure. It is graded (and
+    fails), it doesn't go to errors.jsonl, and it doesn't abort the suite the way a
+    request error does."""
+    overflow = LLMError("prompt is too long", retryable=False, kind="context_overflow")
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider([overflow]), reps=2, concurrency=1)
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    assert rows(cfg, "errors.jsonl") == []
+    assert [r["run_status"] for r in rows(cfg)] == ["context_overflow"] * 2
+    row = rows(cfg)[0]
+    assert row["grade"]["passed"] == 0.0 and row["context"]["overflow"] is True
+    assert "overflowed in 2/2 trials" in summarize(cfg.variant_dir)
+
+
+async def test_rows_record_request_sizes_and_the_code_that_ran(tmp_path: Path) -> None:
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(solve_script()))
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    [row] = rows(cfg)
+    ctx = row["context"]
+    assert ctx["calls"] == 2 and ctx["peak"] >= ctx["mean"] > 0 and ctx["overflow"] is False
+    assert row["meta"]["context"] is True and row["meta"]["git"]["commit"]
+    assert "- context: peak request median" in summarize(cfg.variant_dir)
+
+
+async def test_a_task_can_set_its_own_context_budget(tmp_path: Path) -> None:
+    """S6: low-budget tasks force compaction at eval size; with context off the task's
+    budget is not applied (the S5 agent has none)."""
+    [task] = load_tasks(["long-refactor"])
+    assert task.context_budget == 12000
+    for context, budget in ((True, 12000), (False, 120_000)):
+        cfg = cfg_for(tmp_path / str(context), lambda s: ScriptedProvider([text_response("no")]))
+        cfg.settings = cfg.settings.model_copy(update={"context": context})
+        await run_suite([task], cfg)
+        [row] = rows(cfg)
+        assert (row["meta"]["context"], row["meta"]["context_budget"]) == (context, budget)
+        assert row["grade"]["passed"] == 0.0
 
 
 def planned_solve_script() -> list[LLMResponse | LLMError]:

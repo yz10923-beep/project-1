@@ -1,0 +1,3 @@
+# Desk limits. A trade breaches the per-trade limit when its notional (qty x price)
+# is strictly above it; exactly at the limit is allowed.
+per_trade_notional_usd = 2500000

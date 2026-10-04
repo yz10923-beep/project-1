@@ -61,6 +61,12 @@ class Settings(BaseModel):
     # with backoff, up to this many times and this much total waiting per call.
     llm_max_retries: int = Field(default=4, ge=0, le=20)
     llm_retry_budget_s: float = Field(default=120, ge=0)
+    # S6: context governance. Tool results are capped when created (the full output is
+    # kept outside the workspace), and the history is compacted server-side when the next
+    # request would exceed the budget (tokens). false = the S5 agent, byte for byte.
+    context: bool = True
+    context_budget: int = Field(default=120_000, ge=10_000)
+    tool_result_max_chars: int = Field(default=30_000, ge=2_000)
     anthropic_api_key: SecretStr | None = None
 
     # daemon: auth token file (mode 0600), and how long a run waits for a human approval

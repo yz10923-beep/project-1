@@ -12,6 +12,7 @@ so any number of runs can use one server. FAKE_API_FAST=1 drops the delays (test
 FAKE_API_FAULTS (S5) makes the first requests fail, one fault per request, in order:
 529 (overloaded), 500, 400 (permanent), 429@SECONDS (rate limited, with retry-after),
 stream (text starts streaming, then an overloaded error event mid-response).
+FAKE_API_MAX_PROMPT_CHARS (S6) answers 400 "prompt is too long" past that many chars.
     FAKE_API_FAULTS=529,stream,429@0.2 python3 scripts/fake_api.py 7622
 
     python3 scripts/fake_api.py 7622 &
@@ -23,6 +24,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DELAY = 0.0 if os.environ.get("FAKE_API_FAST") else 1.0
 FAULTS = [f for f in os.environ.get("FAKE_API_FAULTS", "").split(",") if f]
+# S6: a request whose messages serialize to more than this many chars is "too long", as
+# the real API answers a prompt over the model's window (0 = no limit).
+MAX_PROMPT_CHARS = int(os.environ.get("FAKE_API_MAX_PROMPT_CHARS", "0"))
 _lock = threading.Lock()
 
 def next_fault():
@@ -54,6 +58,14 @@ class H(BaseHTTPRequestHandler):
         n = sum(m["role"] == "assistant" for m in body["messages"])
         text, tools, stop = REPLIES[min(n, len(REPLIES) - 1)]
         fault = next_fault()
+        size = len(json.dumps(body["messages"]))
+        if MAX_PROMPT_CHARS and size > MAX_PROMPT_CHARS:
+            msg = f"prompt is too long: {size // 4} tokens > {MAX_PROMPT_CHARS // 4} maximum"
+            err = json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": msg}}).encode()
+            self.send_response(400); self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(err))); self.end_headers()
+            self.wfile.write(err)
+            return
         if fault is not None and fault != "stream":
             code, _, wait = fault.partition("@")
             err = json.dumps({"type": "error", "error": {"type": ERROR_TYPES[int(code)], "message": f"fake {code}"}}).encode()

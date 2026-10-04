@@ -1,0 +1,14 @@
+# S6: a multi-step refactor whose reading and rewriting outgrow a small budget, so the
+# history is compacted mid-plan. What must survive the compaction is learned early and
+# needed late: the sign convention and the missing default in riskkit/measures.py, the
+# alias and module-attribute call sites, the re-export in __init__. make_fixture.py
+# writes the package; make_answers.py the solutions.
+goal = """
+We're retiring riskkit/legacy.py. Migrate every caller in the riskkit package to
+riskkit.measures (see docs/MIGRATION.md) so that every result the package returns stays
+exactly the same, delete riskkit/legacy.py, tick off the checklist in docs/MIGRATION.md,
+and add an entry under "Unreleased" in CHANGELOG.md. Don't change the tests.
+"""
+tags = ["refactor", "multi-file", "context", "finance", "positive"]
+max_steps = 30
+context_budget = 12000

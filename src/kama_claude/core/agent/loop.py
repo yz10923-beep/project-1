@@ -453,6 +453,9 @@ class AgentLoop:
                     )
             if failed is None:
                 break
+            if failed.kind in ("context_overflow", "too_large"):
+                # Not an infra failure: the agent's own history no longer fits.
+                return _Finish("context_overflow", error=str(failed), retryable=False)
             delay = self._retry.delay(failed, attempt)
             if not self._retry.should_retry(failed, attempt, waited, delay):
                 tries = f" (after {attempt - 1} retries)" if attempt > 1 else ""
@@ -509,6 +512,8 @@ class AgentLoop:
                 return _Finish("truncated", resp.text, "response hit max_tokens")
             case "refusal":
                 return _Finish("refused", resp.text, "model declined the request")
+            case "model_context_window_exceeded":
+                return _Finish("context_overflow", resp.text, "the model's context window is full")
             case _:
                 return _Finish("error", resp.text, f"unexpected stop_reason: {resp.stop_reason}")
 

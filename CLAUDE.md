@@ -114,7 +114,9 @@ history and no notes, the S3 agent), `KAMA_SESSIONS_DIR` (`~/.kama/sessions`), `
 false = the S4 approvals: ask for bash/write_file, -y approves all), `KAMA_POLICY_FILE`
 (`~/.kama/policy.toml`), `KAMA_SANDBOX` (auto | bwrap | unshare | off), `KAMA_BASH_ENV_KEEP`
 (credential-looking env vars to keep for bash), `KAMA_PRIVATE_PATHS` (more paths no tool may
-touch), `KAMA_LLM_MAX_RETRIES` (4), `KAMA_LLM_RETRY_BUDGET_S` (120).
+touch), `KAMA_LLM_MAX_RETRIES` (4), `KAMA_LLM_RETRY_BUDGET_S` (120), `KAMA_CONTEXT` (true; false = the
+S5 agent, for A/B runs), `KAMA_CONTEXT_BUDGET` (120000 tokens), `KAMA_TOOL_RESULT_MAX_CHARS`
+(30000) (S6; the last three take effect as S6 lands).
 
 ### Layout
 
@@ -170,7 +172,8 @@ evals/run_evals.py       CLI: list / selftest / run / summary; harness-approval 
 evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ + wrong/*/ + [alt/*/]
                          (log-error-triage is the reference task; `_delete.txt` in a solution deletes;
                          risk-report-spec grades 10 requirements separately, wrong/ from make_answers.py;
-                         multi-run tasks: [[runs]] + setup.py between() + _runs.json in solutions)
+                         multi-run tasks: [[runs]] + setup.py between() + _runs.json in solutions;
+                         S6 tasks set `context_budget`; long-refactor's fixture is make_fixture.py's)
 evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/ git-ignored)
 ```
 
@@ -263,7 +266,10 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   fails (and every `alt/` passes); `selftest` enforces it inside `make verify`. Generated
   inputs (`setup.py`) are seeded, and their hash is pinned in a test.
 - Infra failures (API error, timeout, grader crash, wrong served model) go to
-  `errors.jsonl` and never count as a score. Only the user approves the harness hash
+  `errors.jsonl` and never count as a score. A context overflow is not infra: the
+  agent's history outgrew the window, so it is graded (`context_overflow`). A variant
+  is one condition (harness, model, effort, memory, policy, context, sandbox); a trial
+  that differs stops the suite. Only the user approves the harness hash
   (`--approve-harness`); never pass it on their behalf.
 
 ### Conventions

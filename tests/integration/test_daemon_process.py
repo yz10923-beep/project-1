@@ -18,13 +18,13 @@ from tests.conftest import Daemon, free_port, spawn_daemon
 
 
 @contextlib.contextmanager
-def fake_stack_with(faults: str = "") -> Iterator[Daemon]:
+def fake_stack_with(faults: str = "", **api_env: str) -> Iterator[Daemon]:
     """A real kama-core whose model is scripts/fake_api.py (fast mode) over HTTP; `faults`
     makes its first requests fail (see FAKE_API_FAULTS in the script)."""
     api_port = free_port()
     api = subprocess.Popen(
         [sys.executable, "scripts/fake_api.py", str(api_port)],
-        env={**os.environ, "FAKE_API_FAST": "1", "FAKE_API_FAULTS": faults},
+        env={**os.environ, "FAKE_API_FAST": "1", "FAKE_API_FAULTS": faults, **api_env},
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -233,3 +233,18 @@ def test_permanent_api_errors_are_not_retried(tmp_path: Path) -> None:
     assert out.returncode == 1
     assert "model call failed" not in out.stdout, out.stdout
     assert "error: API error 400" in out.stdout
+
+
+def test_a_prompt_past_the_window_ends_the_run_as_context_overflow(tmp_path: Path) -> None:
+    """S6, over the real SDK: the API's 400 "prompt is too long" is the agent's failure
+    (its history outgrew the window), not a retried or infra error."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with fake_stack_with(FAKE_API_MAX_PROMPT_CHARS="1500") as d:
+        out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
+    assert out.returncode == 1
+    assert "== context_overflow after" in out.stdout, out.stdout
+    assert "model call failed" not in out.stdout  # not retried
+    run_dir = Path(out.stdout.rsplit("events: ", 1)[1].strip()).parent
+    finished = json.loads((run_dir / "events.jsonl").read_text().splitlines()[-1])
+    assert (finished["type"], finished["status"]) == ("run.finished", "context_overflow")

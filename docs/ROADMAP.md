@@ -578,11 +578,15 @@ confirmation run on the three affected tasks.
 Done when: a long session stays under a token budget, and the quality lost to
 compaction is measured (the same tasks, with and without it).
 
-What grows today, unbounded:
-- `bash` output has no cap;
-- `read_file` caps lines (2000) but not bytes;
-- a session replays every earlier run in full;
-- nothing measures a request before it is sent.
+What grows today, and what doesn't:
+- One result can't flood the context: since S1 the registry has cut every tool result
+  to 30,000 chars (head and tail, `truncate_middle`). (The first draft of this plan
+  missed that and said bash output was uncapped.) But the cut text is lost: the model
+  can't page through it, isn't told how to narrow the command, and no event records
+  the cut.
+- What does grow without bound is accumulation. Every step adds its results (up to
+  about 8.5K tokens each), and a session replays every earlier run in full.
+- Nothing measures a request before it is sent.
 
 The 14 current tasks never get near a budget. The largest trial (recall-across-runs)
 used 222K input tokens summed over 13 steps, so each request was a few tens of
@@ -617,7 +621,8 @@ thousands of tokens at most. S6 needs new tasks that force growth.
    - Each `llm.call` span records `context_tokens`; `run.finished` records peak and mean.
    - `Usage` carries `iterations`, and cost sums them. Compaction calls report
      zero top-level tokens, so summing only the top level would undercount.
-2. **Result caps** (`KAMA_TOOL_RESULT_MAX_CHARS`, 32000, about 9K tokens).
+2. **Result caps** (`KAMA_TOOL_RESULT_MAX_CHARS`, 30000, the S1 cap, so the A/B
+   changes what happens at the cap, not where it is).
    - Over the cap, the model gets the head and tail, a marker saying what was
      omitted, and a hint to narrow the command (grep, head, wc) or page through it.
    - The full output goes to `<run dir>/outputs/<tool_use_id>.txt`, outside the
@@ -677,10 +682,11 @@ thousands of tokens at most. S6 needs new tasks that force growth.
 
 ### Evals, written first
 
-- **`big-log-triage`** (new). A seeded log of about 200K lines (hash pinned) that a
-  naive `cat` can't fit in any budget. It asks an aggregation question, which is the
-  ELK triage agent in miniature. Graded: the answer, the log left untouched, and no
-  `context_overflow`.
+- **`big-log-triage`** (new, default budget). A seeded log of about 200K lines (hash
+  pinned) where the natural commands (grepping a reason, a dependency) return thousands
+  of lines. Each capped result adds about 8.5K tokens, so a run of exploratory steps
+  climbs past 120K within one run. That's realistic accumulation, the ELK triage agent
+  in miniature. Graded: the answer, the log left untouched, and no `context_overflow`.
 - **`long-session-recall`** (new, multi-run, `context_budget = 30000`). Five runs in one
   session; run 5 needs an exact fact found in run 1 and a file change made in run 2.
   Sub-checks: answer, change intact, and `compacted` (at least 1). Without a compaction
@@ -716,10 +722,26 @@ Quality loss is measured on the two low-budget tasks: the same tasks with
      be resumed, and its summary says `MIXED CONDITIONS`. Old variants flagged:
      `s5-full` (sandbox none 6 / bwrap 36) and `baseline` (two harness versions,
      15 / 9 trials, from tasks added mid-variant).
-1. S6 evals: the three tasks with oracle/wrong/alt, context fields in eval rows,
-   `context_overflow` grading, and the fake API's compaction and overflow emulation.
+1. S6 evals (done):
+   - **Tasks:** `big-log-triage`, `long-session-recall` and `long-refactor`, each with
+     oracle, wrong and alt solutions. Every wrong answer fails on exactly its own part.
+     The low-budget tasks use 12000 tokens: the fixed prompt (system prompt and tools)
+     is about 4K, which leaves about 8K of conversation room.
+   - **Status:** `context_overflow` is a run status of its own. It covers the API's 400
+     "prompt is too long", a 413, and `stop_reason` `model_context_window_exceeded`.
+     It is graded as the agent's failure: not retried, not sent to `errors.jsonl`, and
+     it doesn't abort the suite.
+   - **Rows:** each row records its request sizes (peak and mean context, which is
+     input plus cache read plus cache write) and the git commit and branch it ran. The
+     run header prints the code, the harness hash and the context setting.
+     `KAMA_CONTEXT` is part of a variant's conditions.
+   - **Fake API:** `FAKE_API_MAX_PROMPT_CHARS` answers "prompt is too long". Compaction
+     emulation moves to commit 3, where something uses it.
+   - **Settings:** `KAMA_CONTEXT`, `KAMA_CONTEXT_BUDGET` and
+     `KAMA_TOOL_RESULT_MAX_CHARS` exist. They take effect in commits 2 and 3.
 2. Accounting, result caps, `read_output`, and their events and spans.
-3. On-demand compaction, resume, replay and sessions.
+3. On-demand compaction, resume, replay and sessions; the fake API emulates compaction;
+   a low-budget trial with no compaction is reported "not exercised" (errors.jsonl).
 4. Trace curve, TUI meter, CLI summary, docs and interview points.
 
 ### The S6 experiment (VM; costs money)
@@ -737,8 +759,10 @@ uv run python -m evals.run_evals compare s5-full s6-full      # regression vs S5
 Predictions, written before the run:
 - **The 14 old tasks:** no compaction and pass rates within noise of s5-full. A cap
   fires rarely (log-error-triage's 54K-line log only if catted whole).
-- **big-log-triage:** on ≥2/3; off fails or costs several times more (overflow or a
-  huge context).
+- **big-log-triage:** both arms ≥2/3. A single result can't overflow either arm, since
+  the 30K cap exists in both. On, peak context stays under the budget (a compaction
+  if a run explores long); off, the peak context in at least one trial goes above
+  120K, and the cost is higher. `read_output` gets used in at least one trial.
 - **long-session-recall / long-refactor:** on, ≥2/3 each with ≥1 compaction per
   trial; off, the same or better on pass, with a peak context several times the
   budget. A loss of more than 1 trial in 6 across the two tasks is the stage's most
