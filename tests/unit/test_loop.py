@@ -158,6 +158,27 @@ async def test_llm_error_finishes_run_with_error(tmp_path: Path) -> None:
     assert sink.types() == ["run.started", "run.finished"]
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        LLMError(
+            "prompt is too long: 1200000 tokens > 1000000", retryable=False, kind="context_overflow"
+        ),
+        LLMError("API error 413: request too large", retryable=False, kind="too_large"),
+        text_response("partial", stop="model_context_window_exceeded"),
+    ],
+)
+async def test_an_overgrown_history_ends_the_run_as_context_overflow(
+    tmp_path: Path, failure: LLMResponse | LLMError
+) -> None:
+    """S6: the agent's own history outgrowing the window is its failure, not infra's:
+    a distinct status that evals grade (an infra `error` would go to errors.jsonl)."""
+    loop, sink = make_loop(ScriptedProvider([failure]), tmp_path)
+    r = await loop.run("go", "r1")
+    assert r.status == "context_overflow" and r.retryable in (False, None)
+    assert sink.types()[-1] == "run.finished"
+
+
 async def test_cancellation_still_emits_run_finished(tmp_path: Path) -> None:
     class Hanging(ScriptedProvider):
         async def complete(self, **_: Any) -> LLMResponse:

@@ -197,6 +197,8 @@ class AnthropicProvider:
                 msg = await stream.get_final_message()
         except anthropic.APIStatusError as e:
             kind = status_kind(e.status_code, e.type)
+            if kind == "invalid_request" and "prompt is too long" in e.message.lower():
+                kind = "context_overflow"
             if kind in RETRYABLE_KINDS and ttft_ms is not None and e.status_code < 300:
                 kind = "stream_interrupted" if kind != "overloaded" else kind
             raise LLMError(

@@ -86,6 +86,7 @@ LLMErrorKind = Literal[
     "permission",  # 403
     "not_found",  # 404: e.g. an unknown model
     "too_large",  # 413: the request is over the size limit
+    "context_overflow",  # 400 "prompt is too long": the history outgrew the model's window
     "billing",  # 402
     "unknown",
 ]

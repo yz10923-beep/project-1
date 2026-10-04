@@ -94,6 +94,8 @@ class Task:
     max_steps: int | None = None
     oracle_reply: str = "Done."
     runs: tuple[RunSpec, ...] = ()
+    # S6: a task can set a low token budget so compaction happens at eval size
+    context_budget: int | None = None
 
     @property
     def fixture(self) -> Path:
@@ -179,6 +181,7 @@ def load_tasks(ids: Iterable[str] | None = None) -> list[Task]:
                 max_steps=cfg.get("max_steps"),
                 oracle_reply=cfg.get("oracle_reply", "Done."),
                 runs=runs,
+                context_budget=cfg.get("context_budget"),
             )
         )
     if wanted is not None and (missing := wanted - {t.id for t in tasks}):
@@ -297,7 +300,8 @@ def synthetic_runs(
 ) -> tuple[RunRecord, ...]:
     """Selftest stand-in for real runs: an overlay's `_runs.json` lists, per run,
     {"tool_calls": [[name, input], ...], "final_text": ..., "changed": {...}, "denied":
-    [indexes of calls that didn't run], "blocks": [[rule, kind, repeated], ...]}. Without one,
+    [indexes of calls that didn't run], "blocks": [[rule, kind, repeated], ...], "status":
+    "completed" | "context_overflow" | ...}. Without one,
     the runs made no tool calls and the last one made all the changes."""
     specs = task.run_specs
     raw: list[dict[str, Any]] = []
@@ -310,7 +314,7 @@ def synthetic_runs(
         records.append(
             RunRecord(
                 goal=spec.goal,
-                status="completed",
+                status=r.get("status", "completed"),
                 final_text=r.get("final_text", reply if last else ""),
                 tool_calls=tuple((n, inp) for n, inp in r.get("tool_calls", [])),
                 changed=r.get("changed", changed if last else {}),
@@ -345,7 +349,7 @@ def selftest(tasks: list[Task]) -> list[str]:
                 apply_overlay(ws, overlay)
             changed = diff_snapshots(before, snapshot(ws))
             runs = synthetic_runs(task, overlay, changed, reply)
-            return run_check(task, ws, Outcome("completed", reply, changed, runs))
+            return run_check(task, ws, Outcome(runs[-1].status, reply, changed, runs))
 
     for task in tasks:
         oracle = task.dir / "oracle"
@@ -386,8 +390,9 @@ def harness_sha() -> str:
 
 
 class SuiteAborted(Exception):
-    """A request error that will repeat on every trial (bad config, unsupported
-    parameter, auth). Fix the config and re-run; scored trials are kept and resumed."""
+    """Something that would repeat on every remaining trial: a request error (bad config,
+    unsupported parameter, auth) or trials running under other conditions than the
+    variant's. Fix the cause and re-run; scored trials are kept and resumed."""
 
 
 @dataclass
@@ -505,6 +510,44 @@ def safety_metrics(events: list[Event]) -> dict[str, Any]:
     }
 
 
+def context_metrics(events: list[Event], statuses: list[str]) -> dict[str, Any]:
+    """How big the requests got (S6). A request's size is exact from its usage: input
+    plus cache reads plus cache writes (input_tokens alone is only the uncached tail)."""
+    sizes = [
+        e.usage.input_tokens + e.usage.cache_read_input_tokens + e.usage.cache_creation_input_tokens
+        for e in events
+        if isinstance(e, LLMResponseEvent)
+    ]
+    return {
+        "peak": max(sizes, default=0),
+        "mean": round(statistics.mean(sizes)) if sizes else 0,
+        "calls": len(sizes),
+        "overflow": "context_overflow" in statuses,
+    }
+
+
+@functools.cache
+def git_info() -> dict[str, Any] | None:
+    """Which code a trial ran: the harness hash covers evals/, this covers the agent too.
+    (An S5 confirmation run was once made from a branch without the fix.)"""
+
+    def git(*args: str) -> str:
+        out = subprocess.run(
+            ["git", *args], cwd=EVALS_DIR, capture_output=True, text=True, timeout=10
+        )
+        out.check_returncode()
+        return out.stdout.strip()
+
+    try:
+        return {
+            "commit": git("rev-parse", "--short=12", "HEAD"),
+            "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+        }
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def to_trace(task: Task, ws: Path, events: list[Event]) -> list[dict[str, Any]]:
     """Events -> the role-based transcript format eval viewers render."""
     turns: list[dict[str, Any]] = [
@@ -572,6 +615,7 @@ def conditions(row: dict[str, Any]) -> dict[str, Any]:
         "effort": meta.get("effort"),
         "memory": meta.get("memory"),
         "policy": meta.get("policy"),
+        "context": meta.get("context"),
         "sandbox": (row.get("safety") or {}).get("sandbox"),
     }
 
@@ -640,8 +684,8 @@ async def _run_all(task: Task, ws: Path, settings: Settings, provider: LLMProvid
             ),
         )
         out.append(_Ran(result, run_dir, events, record))
-        if result.status == "error":
-            break
+        if result.status in ("error", "context_overflow"):
+            break  # an overflowed session overflows again on its next run
     return out
 
 
@@ -668,6 +712,8 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
             }
             if task.max_steps:
                 overrides["max_steps"] = task.max_steps
+            if task.context_budget and cfg.settings.context:
+                overrides["context_budget"] = task.context_budget
             settings = cfg.settings.model_copy(update=overrides)
             provider = (cfg.provider_factory or make_provider)(settings)
             err_base = {"prompt_id": task.id, "rep": rep, "attempt": attempt}
@@ -709,7 +755,10 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                     {**err_base, "class": cls, "error": result.error, "usage": usage},
                 )
                 if cls == "request_error":
-                    cfg.abort_reason = f"{task.id} rep{rep}: {result.error}"
+                    cfg.abort_reason = (
+                        f"a request error will repeat on every trial: {task.id} rep{rep}: "
+                        f"{result.error}"
+                    )
                     return None
                 if internal or attempt == cfg.max_attempts:
                     return None
@@ -757,6 +806,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 "plan": plan_metrics(events),
                 "memory": memory_metrics(events) if settings.memory else None,
                 "safety": safety_metrics(events),
+                "context": context_metrics(events, [r.result.status for r in ran]),
                 "latency_s": round(sum(e.latency_ms for e in llm) / 1000, 2),
                 "wall_s": round(wall_s, 2),
                 "attempts": attempt,
@@ -769,6 +819,9 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                     "effort": getattr(provider, "effort", settings.effort),
                     "memory": settings.memory,
                     "policy": settings.policy,
+                    "context": settings.context,
+                    "context_budget": settings.context_budget,
+                    "git": git_info(),
                 },
             }
             if len(task.run_specs) > 1:
@@ -980,6 +1033,14 @@ def summarize(variant_dir: Path) -> str:
                 if len(known) < n
                 else ""
             )
+        )
+    if sized := [r["context"] for r in ok if r.get("context")]:
+        overflowed = sum(c["overflow"] for c in sized)
+        lines.append(
+            f"- context: peak request median "
+            f"{statistics.median(c['peak'] for c in sized) / 1000:.1f}K, "
+            f"max {max(c['peak'] for c in sized) / 1000:.1f}K tokens"
+            f" · overflowed in {overflowed}/{len(sized)} trials"
         )
     if mixed := _mixed_conditions(rows):
         lines.append(f"- MIXED CONDITIONS, not one variant: {_render_mixed(mixed)}")

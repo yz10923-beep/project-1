@@ -1,0 +1,19 @@
+# S6: realistic accumulation. ~200k log lines; every natural query returns thousands of
+# lines, so each exploratory step adds a capped result (~8.5K tokens) and a run that
+# explores climbs past the default budget. The ELK incident-triage agent in miniature.
+# Traps: see setup.py. Answers: make_answers.py.
+goal = """
+Since sometime on 2024-03-15 our pre-trade risk gateway has been rejecting orders with
+reason MARGIN_TIMEOUT. From logs/gateway.log (all timestamps UTC), find:
+
+- start: the timestamp of the earliest order rejected with reason MARGIN_TIMEOUT (by
+  timestamp), exactly as it appears in the log;
+- dependency: during the incident, from that first MARGIN_TIMEOUT rejection to the last
+  one (inclusive), which upstream dependency logged the most "upstream timeout" warnings;
+- rejected: how many orders were rejected with reason MARGIN_TIMEOUT.
+
+Write incident.json as {"start": "...", "dependency": "...", "rejected": N}. Do not
+modify the log.
+"""
+tags = ["analysis", "logs", "context", "finance", "positive"]
+max_steps = 25

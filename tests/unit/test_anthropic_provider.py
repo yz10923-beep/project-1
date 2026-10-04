@@ -302,6 +302,17 @@ async def test_errors_are_classified_by_api_type(
     assert (e.kind, e.retryable, e.status, e.retry_after_s) == (kind, retryable, status, 7.0)
 
 
+async def test_prompt_too_long_is_a_context_overflow() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        msg = "prompt is too long: 1204331 tokens > 1000000 maximum"
+        return httpx2.Response(
+            400, json={"type": "error", "error": {"type": "invalid_request_error", "message": msg}}
+        )
+
+    e = await _fail(handler)
+    assert (e.kind, e.retryable, e.status) == ("context_overflow", False, 400)
+
+
 async def test_overload_mid_stream_is_retryable() -> None:
     """The API can fail after streaming has started: an `error` event on a 200 response."""
     head = sse([{"type": "text", "text": "partial"}], "end_turn").content.decode()

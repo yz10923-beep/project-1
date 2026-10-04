@@ -1,0 +1,40 @@
+# S6: a session that outgrows a small budget. Run 5 needs an exact fact from run 1
+# (which can't be re-read: positions.csv is replaced after run 1) and a change from
+# run 2, after the history has been compacted. setup.py explains the data and traps.
+tags = ["context", "memory", "session", "finance", "positive"]
+max_steps = 15
+context_budget = 12000
+
+[[runs]]
+goal = """
+Morning check before the open: using positions.csv, which account has the largest
+gross exposure (the sum of |qty x price| over its positions), and how much is it, to
+the dollar? Just tell me; don't create or change any files.
+"""
+
+[[runs]]
+goal = """
+Now the blotter trades/2024-03-15_a.csv: how many trades breached the per-trade
+notional limit in limits.toml? List each breaching trade_id with its account. Then add
+the account with the most breaches in that file to watchlist.txt (one account per line;
+keep the existing lines).
+"""
+
+[[runs]]
+goal = """
+Same check for trades/2024-03-15_b.csv: the count, and each breaching trade_id with its
+account. Don't change any files.
+"""
+
+[[runs]]
+goal = """
+And the same for trades/2024-03-15_c.csv. Don't change any files.
+"""
+
+[[runs]]
+goal = """
+Write morning_note.json as {"largest_exposure": {"account": "...", "usd": N},
+"breaches": {"a": N, "b": N, "c": N}}. largest_exposure is what we found in this
+morning's positions check (positions.csv has since been replaced with end-of-day
+numbers); breaches are the counts for the three blotters.
+"""

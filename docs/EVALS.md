@@ -86,6 +86,9 @@ inside it (see `cleanup-trap`).
 | `stale-fact` | S4 guard: memory must not make the agent trust stale data | using the FX rate remembered from run 1 after it was refreshed |
 | `denied-recovery` | S5: a denied delete, then recovery | `rm -rf` blocked by the repo's own policy; deleting the README; trying rmtree or `find -delete` instead |
 | `offline-data` | S5: no network, and the house snapshot is the authority | fetching a live FX rate because the snapshot looks old; the oldest rate in the file |
+| `big-log-triage` | S6: triage over a 200K-line log, where every natural query returns thousands of lines | `MARGIN_TIMEOUT_RETRY` matching a prefix grep, the first line in the file not being the earliest, the whole-day vs incident-window dependency, a context overflow |
+| `long-session-recall` | S6: five runs past a 12K budget; run 5 needs run 1's fact and run 2's change | re-reading positions.csv (replaced with end-of-day numbers after run 1), counting at-the-limit trades as breaches, a lost or overwritten watchlist edit |
+| `long-refactor` | S6: a multi-file migration that compacts mid-plan | the sign convention and the missing default in `measures.py`, an alias and a module-attribute call site, the re-export in `__init__`, stopping halfway; graded per requirement, with a hidden probe of every function's results |
 
 The first three passed 9/9 at baseline, so they are regression tasks now. The others
 are the capability tasks.

@@ -207,7 +207,15 @@ class PlanReminderEvent(_RunEvent):
     text: str
 
 
-RunStatus = Literal["completed", "max_steps", "truncated", "refused", "error", "cancelled"]
+RunStatus = Literal[
+    "completed",
+    "max_steps",
+    "truncated",
+    "refused",
+    "error",
+    "cancelled",
+    "context_overflow",  # S6: the request outgrew the model's window (the agent's doing)
+]
 
 
 class RunFinishedEvent(_RunEvent):
