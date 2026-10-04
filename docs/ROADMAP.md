@@ -756,8 +756,26 @@ S6 lands in four parts, committed as `S6 (n/4): ...` like S5's three.
      emulation moves to part 3, where something uses it.
    - **Settings:** `KAMA_CONTEXT`, `KAMA_CONTEXT_BUDGET` and
      `KAMA_TOOL_RESULT_MAX_CHARS` exist. They take effect in parts 2 and 3.
-2. **S6 (2/4): accounting and result caps**: the token meter, caps that keep the full
-   output, `read_output`, and their events and spans.
+2. **S6 (2/4): accounting and result caps** (done):
+   - **Cut, keep, point** (`core/outputs.py`). Over the cap, the whole text goes to
+     `<run dir>/outputs/<tool_use_id>.txt`. The model sees whole lines from the head
+     and the tail, plus a notice naming the missing line range, the output id, and how
+     to read it (`read_output`) or narrow the command. `tool.finished` records `cut`
+     (original and kept chars, lines, id); the tool span records the chars cut.
+   - **`read_output(id, offset, limit)`**: numbered lines, like `read_file`. It reads
+     this run's outputs and earlier runs' of the session, newest first. Ids are a
+     closed alphabet, so it can't be pointed at a path. The policy allows it in every
+     mode as a read. `read_file` and `read_output` cut lines over 2000 chars
+     (minified files).
+   - **Accounting** (`core/context.py`, `ContextMeter`). Sizes are exact from usage;
+     the unsent tail is estimated (chars/3, high on purpose). An exact
+     `count_tokens` is used near the budget, falling back to the estimate if it fails.
+     Every `llm.call` span records `context_tokens` and `context_estimate`, and
+     `run.finished` records `context_peak`. The meter measures with context off too:
+     the off arm of the A/B is measured on the same scale.
+   - **Rows:** `context.cut_results`, `chars_cut` and `read_output_calls`.
+   - **Context off** changes nothing the model sees: the same tools, the S1 middle cut,
+     no outputs dir. Tested byte for byte against `truncate_middle`.
 3. **S6 (3/4): compaction**: on-demand compaction, resume, replay and sessions; the
    fake API emulates compaction; a low-budget trial with no compaction is reported
    "not exercised" (errors.jsonl).

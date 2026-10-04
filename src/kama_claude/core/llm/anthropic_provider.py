@@ -167,6 +167,22 @@ class AnthropicProvider:
             req["fallbacks"] = "default"
         return req
 
+    async def count_tokens(
+        self, *, system: str, messages: list[Message], tools: list[ToolSpec]
+    ) -> int:
+        """The exact input size of a request (S6: the context meter asks near the budget).
+        Free, but a round trip: only for decisions the estimate can't make."""
+        try:
+            res = await self._client.beta.messages.count_tokens(
+                model=self._model,
+                system=system,
+                messages=messages,  # type: ignore[arg-type]  # our Message is the wire shape
+                tools=tools,  # type: ignore[arg-type]
+            )
+        except anthropic.APIError as e:
+            raise LLMError(f"token count failed: {e}", retryable=False) from e
+        return res.input_tokens
+
     async def complete(
         self,
         *,

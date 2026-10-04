@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 in progress (1/4 evals done; next 2/4 accounting and result caps)**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 in progress (1/4 evals, 2/4 accounting and result caps done; next 3/4 compaction)**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -116,7 +116,7 @@ false = the S4 approvals: ask for bash/write_file, -y approves all), `KAMA_POLIC
 (credential-looking env vars to keep for bash), `KAMA_PRIVATE_PATHS` (more paths no tool may
 touch), `KAMA_LLM_MAX_RETRIES` (4), `KAMA_LLM_RETRY_BUDGET_S` (120), `KAMA_CONTEXT` (true; false = the
 S5 agent, for A/B runs), `KAMA_CONTEXT_BUDGET` (120000 tokens), `KAMA_TOOL_RESULT_MAX_CHARS`
-(30000) (S6; the last three take effect as S6 lands).
+(30000) (S6; the budget takes effect with compaction, part 3).
 
 ### Layout
 
@@ -140,6 +140,9 @@ src/kama_claude/
     policy/paths.py      where a path points: inside, protected, outside, secret, scratch
     policy/engine.py     Policy: modes, rule files (user allows, workspace only tightens), Decision
     sandbox.py           bwrap / unshare / none, probed for real; bash argv; scrubbed env
+    context.py           ContextMeter: request sizes exact from usage, the unsent tail estimated,
+                         an exact count_tokens near the budget (S6)
+    outputs.py           OutputStore (results cut at the cap, saved whole in the run dir); cut()
     plan.py              Plan (a run's task DAG: add/update/render), PlanTask, statuses
     session.py           SessionStore: a session = its runs in order; history replayed from events
     notes.py             NoteStore (workspace/session scope), NoteBook, memory_preamble()
@@ -151,6 +154,7 @@ src/kama_claude/
     tools/builtin.py     read_file, list_dir, write_file, bash
     tools/plan_tools.py  task_create, task_update (batched), task_get, task_list (no approval)
     tools/note_tools.py  note_save, note_update, note_delete, note_list (no approval)
+    tools/output_tools.py read_output: page through a cut result (no approval; S6)
     agent/loop.py        AgentLoop: model -> tools -> results -> repeat; emits run events
     agent/history.py     replay() events -> messages; repair_orphans(); conversation_problems()
     agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
@@ -260,6 +264,14 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
 - Model calls are retried by the loop (SDK retries off): retryable kinds only, with
   backoff, retry-after and a budget, each one an llm.retry event. Tool calls are never
   retried automatically. Every failed tool result has an error_kind.
+- A tool result over the cap is cut when it is created, never later (cutting history
+  would be an edit). With KAMA_CONTEXT on, the whole text is first saved in the run dir
+  (outside the workspace) and is readable only through read_output, for this run and
+  earlier runs of its session. The tool.finished event stores exactly what the model
+  saw, plus `cut`. KAMA_CONTEXT=false = the S1 middle cut and no read_output (the S5 agent).
+- A request's size is exact from its usage (input + cache read + cache write); only the
+  part appended since is estimated. llm.call spans record both, so the estimator's error
+  is measured; run.finished records the peak.
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

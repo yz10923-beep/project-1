@@ -518,11 +518,16 @@ def context_metrics(events: list[Event], statuses: list[str]) -> dict[str, Any]:
         for e in events
         if isinstance(e, LLMResponseEvent)
     ]
+    finished = [e for e in events if isinstance(e, ToolFinishedEvent)]
+    cuts = [e.cut for e in finished if e.cut is not None]
     return {
         "peak": max(sizes, default=0),
         "mean": round(statistics.mean(sizes)) if sizes else 0,
         "calls": len(sizes),
         "overflow": "context_overflow" in statuses,
+        "cut_results": len(cuts),
+        "chars_cut": sum(c.original_chars - c.kept_chars for c in cuts),
+        "read_output_calls": sum(e.name == "read_output" for e in finished),
     }
 
 
@@ -1041,6 +1046,8 @@ def summarize(variant_dir: Path) -> str:
             f"{statistics.median(c['peak'] for c in sized) / 1000:.1f}K, "
             f"max {max(c['peak'] for c in sized) / 1000:.1f}K tokens"
             f" · overflowed in {overflowed}/{len(sized)} trials"
+            f" · results cut {sum(c.get('cut_results', 0) for c in sized)}"
+            f", read_output calls {sum(c.get('read_output_calls', 0) for c in sized)}"
         )
     if mixed := _mixed_conditions(rows):
         lines.append(f"- MIXED CONDITIONS, not one variant: {_render_mixed(mixed)}")

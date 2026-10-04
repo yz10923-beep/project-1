@@ -18,16 +18,19 @@ from kama_claude.core.llm.anthropic_provider import AnthropicProvider
 from kama_claude.core.llm.retry import RetryPolicy
 from kama_claude.core.llm.types import LLMProvider, Message
 from kama_claude.core.notes import NoteStore, memory_preamble
+from kama_claude.core.outputs import OutputStore
 from kama_claude.core.policy.engine import Mode, Policy, Rule
 from kama_claude.core.sandbox import Sandbox, detect
 from kama_claude.core.session import SessionStore
 from kama_claude.core.tools.builtin import builtin_tools
 from kama_claude.core.tools.note_tools import note_tools
+from kama_claude.core.tools.output_tools import output_tools
 from kama_claude.core.tools.plan_tools import plan_tools
-from kama_claude.core.tools.registry import ToolRegistry
+from kama_claude.core.tools.registry import MAX_RESULT_CHARS, ToolRegistry
 from kama_claude.core.trace.tracer import JsonlSpanWriter, Tracer
 
 TRACE_FILE = "trace.jsonl"
+OUTPUTS_DIR = "outputs"  # S6: tool results cut at the cap, saved whole
 
 
 def new_run_id() -> str:
@@ -143,6 +146,24 @@ def retry_policy(settings: Settings) -> RetryPolicy:
     return RetryPolicy(max_retries=settings.llm_max_retries, budget_s=settings.llm_retry_budget_s)
 
 
+def output_store(
+    settings: Settings,
+    run_id: str,
+    run_dir: Path,
+    session_id: str | None,
+    sessions: SessionStore,
+) -> OutputStore | None:
+    """S6: where this run saves results cut at the cap, and where read_output looks
+    (this run, then the session's earlier runs, newest first). None with KAMA_CONTEXT=false."""
+    if not settings.context:
+        return None
+    earlier: list[Path] = []
+    if session_id is not None:
+        runs = sessions.get(session_id).runs
+        earlier = [Path(r.run_dir) / OUTPUTS_DIR for r in reversed(runs) if r.run_id != run_id]
+    return OutputStore(run_dir / OUTPUTS_DIR, earlier)
+
+
 def build_loop(
     settings: Settings,
     *,
@@ -155,10 +176,12 @@ def build_loop(
     mode: Mode | None = None,
     session_rules: list[Rule] | None = None,
     on_remember: RememberRules | None = None,
+    outputs: OutputStore | None = None,
 ) -> AgentLoop:
     tools = builtin_tools()
     tools += plan_tools() if settings.planning else []
     tools += note_tools() if settings.memory else []
+    tools += output_tools() if outputs is not None else []
     keep = frozenset(k.strip() for k in settings.bash_env_keep.split(",") if k.strip())
     return AgentLoop(
         provider=provider or make_provider(settings),
@@ -175,6 +198,11 @@ def build_loop(
         on_remember=on_remember,
         env_keep=keep,
         hidden=private_paths(settings),
+        outputs=outputs,
+        max_result_chars=settings.tool_result_max_chars
+        if outputs is not None
+        else MAX_RESULT_CHARS,
+        context_budget=settings.context_budget,
     )
 
 
@@ -219,6 +247,7 @@ async def run_goal(
         mode=mode,
         session_rules=session_rules,
         on_remember=remember,
+        outputs=output_store(settings, run_id, run_dir, session_id, store),
     )
     status = "error"
     try:

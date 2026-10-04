@@ -31,6 +31,7 @@ from kama_claude.core.agent.runner import (
     make_provider,
     new_run_id,
     note_store,
+    output_store,
     prepare_run,
     run_tracer,
     runs_root,
@@ -276,6 +277,7 @@ class RunManager:
                 mode=mode or ("auto" if auto_approve else None),
                 session_rules=session_rules,
                 on_remember=remember,
+                outputs=output_store(settings, run_id, run_dir, session_id, self.sessions),
             )
         except BaseException:
             # e.g. a broken policy file: the run never started, so it must not stay

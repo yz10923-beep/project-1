@@ -60,7 +60,7 @@ from kama_claude.core.bus.commands import (
     StreamEnd,
 )
 from kama_claude.core.bus.envelope import INVALID_PARAMS
-from kama_claude.core.bus.events import EVENT_ADAPTER, Event
+from kama_claude.core.bus.events import EVENT_ADAPTER, Event, ToolFinishedEvent
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.types import LLMProvider
 from kama_claude.core.plan import NewTask, TaskChange
@@ -688,3 +688,24 @@ async def test_a_broken_policy_file_rejects_the_run_and_frees_the_session(
     [info] = mgr.sessions.list_sessions()
     assert [r.status for r in info.runs] == ["error"]
     assert mgr.active_run(info.session_id) is None
+
+
+async def test_daemon_runs_keep_cut_output_readable(daemon_factory: Any, tmp_path: Path) -> None:
+    """S6: the daemon's runs get the output store too (the manager builds its own loop)."""
+
+    def script() -> ScriptedProvider:
+        return ScriptedProvider(
+            [
+                tool_response(("t1", "bash", {"command": "seq 1 40000"})),
+                tool_response(("t2", "read_output", {"id": "t1", "offset": 3, "limit": 1})),
+                text_response("read it"),
+            ]
+        )
+
+    d = await daemon_factory(script)
+    async with d.client() as c:
+        run_id = await start(c, d)
+        events, _ = await collect(c, run_id)
+    done = {e.tool_use_id: e for e in events if isinstance(e, ToolFinishedEvent)}
+    assert done["t1"].cut is not None and done["t2"].output.splitlines()[0] == "     3\t2"
+    assert any((tmp_path / "runs").rglob("outputs/t1.txt"))

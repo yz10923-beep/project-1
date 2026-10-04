@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel
 
 from kama_claude.core.notes import NoteBook
+from kama_claude.core.outputs import OutputCut, OutputStore
 from kama_claude.core.plan import Plan
 from kama_claude.core.sandbox import Sandbox
 
@@ -25,6 +26,11 @@ class ToolContext:
     network: bool = True
     env_keep: frozenset[str] = frozenset()
     hidden: tuple[Path, ...] = ()  # private paths the sandbox hides from bash (if it can)
+    # S6: with a store, a result over the cap is saved whole and the model told how to
+    # page through it; without one (KAMA_CONTEXT=false) the S1 middle cut applies.
+    outputs: OutputStore | None = None
+    max_result_chars: int = 30_000
+    max_line_chars: int | None = None  # read_file / read_output cut longer lines (S6)
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,7 @@ class ToolResult:
     content: str
     is_error: bool = False
     error_kind: str | None = None  # set when is_error: what kind of failure (S5)
+    cut: OutputCut | None = None  # set when the result was cut at the cap (S6)
 
 
 class ToolError(Exception):

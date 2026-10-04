@@ -50,10 +50,12 @@ from kama_claude.core.bus.events import (
     ToolPolicyEvent,
     ToolStartedEvent,
 )
+from kama_claude.core.context import ContextMeter, TokenCounter
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.retry import NO_RETRY, RetryPolicy
 from kama_claude.core.llm.types import LLMError, LLMProvider, Message, ToolCall, Usage
 from kama_claude.core.notes import NoteBook, NoteStore
+from kama_claude.core.outputs import LINE_MAX_CHARS, OutputStore
 from kama_claude.core.plan import (
     PLAN_TOOL_NAMES,
     NewTask,
@@ -69,7 +71,7 @@ from kama_claude.core.policy.engine import Decision, Policy, Rule, call_key, den
 from kama_claude.core.sandbox import Sandbox
 from kama_claude.core.tools.base import ToolContext, ToolResult
 from kama_claude.core.tools.note_tools import NOTE_TOOL_NAMES
-from kama_claude.core.tools.registry import ToolRegistry
+from kama_claude.core.tools.registry import MAX_RESULT_CHARS, ToolRegistry
 from kama_claude.core.trace.tracer import Tracer
 
 logger = logging.getLogger(__name__)
@@ -163,6 +165,8 @@ class _RunState:
     failures: Counter[str] = field(default_factory=Counter)  # call key -> times it failed
     denied_calls: set[str] = field(default_factory=set)
     denied_rules: set[str] = field(default_factory=set)
+    # S6: request sizes (measured with KAMA_CONTEXT on or off; only S6 acts on them)
+    meter: ContextMeter = field(default_factory=lambda: ContextMeter(120_000))
 
     @property
     def budget_used(self) -> int:
@@ -210,13 +214,24 @@ class AgentLoop:
         env_keep: frozenset[str] = frozenset(),
         hidden: tuple[Path, ...] = (),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        outputs: OutputStore | None = None,
+        max_result_chars: int = MAX_RESULT_CHARS,
+        context_budget: int = 120_000,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._sink = sink
         self._base_ctx = ToolContext(
-            workspace=workspace.resolve(), sandbox=sandbox, env_keep=env_keep, hidden=hidden
+            workspace=workspace.resolve(),
+            sandbox=sandbox,
+            env_keep=env_keep,
+            hidden=hidden,
+            # S6: None = the S1 cap (head and tail, middle lost), as in S5
+            outputs=outputs,
+            max_result_chars=max_result_chars,
+            max_line_chars=LINE_MAX_CHARS if outputs is not None else None,
         )
+        self._context_budget = context_budget
         self._ctx = self._base_ctx
         # S5: None = the S4 approvals (ask for every requires_approval tool).
         self._policy = policy
@@ -335,7 +350,8 @@ class AgentLoop:
             else None
         )
         self._ctx = dataclasses.replace(self._base_ctx, plan=Plan(), notes=book)
-        state = self._state = _RunState()
+        counter = self._provider if isinstance(self._provider, TokenCounter) else None
+        state = self._state = _RunState(meter=ContextMeter(self._context_budget, counter))
         self._pending_notices = []
         self._run_id = run_id
         messages, repaired = start_run_messages(history, goal, preamble)
@@ -378,6 +394,7 @@ class AgentLoop:
                     approvals_asked=state.approvals_asked,
                     llm_retries=state.llm_retries,
                     tool_errors=dict(state.tool_errors),
+                    context_peak=state.meter.peak,
                 )
             )
             return RunResult(run_id, status, text, state.steps, state.usage, error, retryable)
@@ -428,6 +445,7 @@ class AgentLoop:
         async def on_text(text: str) -> None:
             await self._sink.emit(LLMDeltaEvent(run_id=run_id, step=step, text=text))
 
+        estimate = state.meter.estimate(system, tools, messages)
         attempt, waited = 0, 0.0
         while True:
             attempt += 1
@@ -444,6 +462,8 @@ class AgentLoop:
                     failed = e
                 else:
                     usage = resp.usage.model_dump()
+                    size = state.meter.observe(resp.usage, len(messages))
+                    llm_span.set(context_tokens=size, context_estimate=estimate)
                     llm_span.set(
                         model=resp.model,
                         stop_reason=resp.stop_reason,
@@ -594,6 +614,9 @@ class AgentLoop:
         with self._tracer.span(f"tool {call.name}", "tool", tool=call.name) as span:
             out = await self._approve_and_execute(run_id, step, call)
             span.set(denied=out.denied, output_chars=len(out.result.content))
+            if out.result.cut is not None:
+                c = out.result.cut
+                span.set(cut_chars=c.original_chars - c.kept_chars, output_id=c.output_id)
             if out.result.is_error:
                 span.set(error_kind=out.result.error_kind)
                 span.fail("denied" if out.denied else out.result.content[:200])
@@ -632,6 +655,7 @@ class AgentLoop:
                 duration_ms=out.duration_ms,
                 approval_ms=out.approval_ms,
                 error_kind=out.result.error_kind,
+                cut=out.result.cut,
             )
         )
         block: dict[str, Any] = {
@@ -683,7 +707,7 @@ class AgentLoop:
             else dataclasses.replace(self._ctx, network=network)
         )
         with self._tracer.span("tool.exec", "tool", network=network):
-            result = await self._registry.execute(call.name, call.input, ctx)
+            result = await self._registry.execute(call.name, call.input, ctx, output_id=call.id)
         return result, _ms_since(t_exec)
 
     async def _ask(

@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kama_claude.core.outputs import clip_line
 from kama_claude.core.sandbox import Sandbox, scrubbed_env
 from kama_claude.core.tools.base import (
     Tool,
@@ -56,6 +57,8 @@ class ReadFile(Tool[ReadFileParams]):
         chunk = lines[start : start + params.limit]
         if not chunk:
             return ToolResult(f"(file has {len(lines)} lines; nothing at offset {params.offset})")
+        if ctx.max_line_chars is not None:  # S6: a minified line can't fill the context
+            chunk = [clip_line(line, ctx.max_line_chars) for line in chunk]
         body = "\n".join(f"{i:>6}\t{line}" for i, line in enumerate(chunk, start=params.offset))
         end = start + len(chunk)
         if end < len(lines):

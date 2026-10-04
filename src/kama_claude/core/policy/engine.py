@@ -101,6 +101,7 @@ READ_TOOLS = {
     "note_update",
     "note_delete",
     "note_list",
+    "read_output",  # S6: this conversation's own saved tool output
 }
 
 
@@ -294,6 +295,8 @@ class Policy:
                     )
                 ], None
             return [Effect("read", f"{tool} only reads", raw, paths=(info,))], None
+        if tool == "read_output":
+            return [Effect("read", "read_output reads the run's own saved tool output", tool)], None
         if tool in READ_TOOLS:
             return [Effect("read", f"{tool} changes only the run's own plan or notes", tool)], None
         return [Effect("exec", f"{tool} is a tool the policy has no rules for", tool)], None

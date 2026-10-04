@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 
 from kama_claude.core.llm.types import StopReason, Usage
 from kama_claude.core.notes import Note, NoteAction
+from kama_claude.core.outputs import OutputCut
 from kama_claude.core.plan import ChangedBy, PlanTask
 
 
@@ -149,6 +150,11 @@ class ToolFinishedEvent(_RunEvent):
         description="invalid_input | unknown_tool | not_found | blocked | denied | timeout | "
         "crashed | ... (S5); None when the call succeeded.",
     )
+    cut: OutputCut | None = Field(
+        default=None,
+        description="S6: the result was over the cap; `output` is what the model saw, and the "
+        "whole text was saved under output_id for read_output.",
+    )
 
 
 class LLMRetryEvent(_RunEvent):
@@ -239,6 +245,8 @@ class RunFinishedEvent(_RunEvent):
     approvals_asked: int = 0
     llm_retries: int = 0
     tool_errors: dict[str, int] = Field(default_factory=dict, description="By error kind.")
+    # S6: the largest request the run sent, in tokens (input + cache read + cache write).
+    context_peak: int = 0
 
 
 Event = Annotated[

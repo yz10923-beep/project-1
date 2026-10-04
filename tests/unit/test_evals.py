@@ -261,6 +261,7 @@ async def test_rows_record_request_sizes_and_the_code_that_ran(tmp_path: Path) -
     [row] = rows(cfg)
     ctx = row["context"]
     assert ctx["calls"] == 2 and ctx["peak"] >= ctx["mean"] > 0 and ctx["overflow"] is False
+    assert (ctx["cut_results"], ctx["chars_cut"], ctx["read_output_calls"]) == (0, 0, 0)
     assert row["meta"]["context"] is True and row["meta"]["git"]["commit"]
     assert "- context: peak request median" in summarize(cfg.variant_dir)
 
