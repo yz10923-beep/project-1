@@ -402,6 +402,8 @@ class RunConfig:
     results_dir: Path = RESULTS_DIR
     # Set by the first non-retryable request error; stops the remaining trials.
     abort_reason: str | None = None
+    # What every trial of this variant ran under; from its scored rows, or the first trial.
+    conditions: dict[str, Any] | None = None
 
     @property
     def variant_dir(self) -> Path:
@@ -558,6 +560,32 @@ def done_keys(variant_dir: Path) -> set[tuple[str, int]]:
         return set()
     rows = [json.loads(line) for line in path.read_text().splitlines() if line]
     return {(r["prompt_id"], r["rep"]) for r in rows}
+
+
+def conditions(row: dict[str, Any]) -> dict[str, Any]:
+    """What a scored trial ran under. A variant is one condition: rows that differ here
+    are not comparable (S5's full arm mixed `none` and `bwrap` across a resume)."""
+    meta = row.get("meta", {})
+    return {
+        "harness_sha": meta.get("harness_sha"),
+        "model": row.get("model"),
+        "effort": meta.get("effort"),
+        "memory": meta.get("memory"),
+        "policy": meta.get("policy"),
+        "sandbox": (row.get("safety") or {}).get("sandbox"),
+    }
+
+
+def condition_diff(a: dict[str, Any], b: dict[str, Any]) -> dict[str, list[Any]]:
+    return {k: [a.get(k), b.get(k)] for k in sorted(a.keys() | b.keys()) if a.get(k) != b.get(k)}
+
+
+def _mixed_conditions(rows: list[dict[str, Any]]) -> dict[str, Counter[str]]:
+    seen: dict[str, Counter[str]] = defaultdict(Counter)
+    for r in rows:
+        for k, v in conditions(r).items():
+            seen[k][str(v)[:12] if k == "harness_sha" else str(v)] += 1
+    return {k: c for k, c in seen.items() if len(c) > 1}
 
 
 @dataclass
@@ -754,6 +782,21 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                     }
                     for r in ran
                 ]
+            got = conditions(row)
+            if cfg.conditions is None:
+                cfg.conditions = got
+            elif diff := condition_diff(cfg.conditions, got):
+                # Not a score for this variant, and every later trial would differ too.
+                _append(
+                    vdir / "errors.jsonl",
+                    {**err_base, "class": "condition_mismatch", "diff": diff, "usage": usage},
+                )
+                cfg.abort_reason = (
+                    f"{task.id} rep{rep} ran under different conditions than this variant's "
+                    f"other trials ({', '.join(f'{k}: {a} -> {b}' for k, (a, b) in diff.items())})"
+                    ". Run it as a new variant."
+                )
+                return None
             return row
     return None
 
@@ -763,6 +806,13 @@ async def run_suite(tasks: list[Task], cfg: RunConfig) -> None:
     vdir.mkdir(parents=True, exist_ok=True)
     _write_state_file(cfg.results_dir)
     done = done_keys(vdir)
+    scored, _ = _load_rows(vdir)
+    if mixed := _mixed_conditions(scored):
+        raise SuiteAborted(
+            f"{vdir.name} already mixes conditions ({_render_mixed(mixed)}); start a new variant"
+        )
+    if scored and cfg.conditions is None:
+        cfg.conditions = conditions(scored[0])
     todo = [(t, r) for t in tasks for r in range(cfg.reps) if (t.id, r) not in done]
     if len(done):
         print(f"resuming: {len(done)} trial(s) already scored, {len(todo)} to run")
@@ -834,6 +884,12 @@ def _planning_line(rows: list[dict[str, Any]]) -> str:
         f"{task_calls / tool_calls:.0%} of tool calls · plan-only steps "
         f"{sum(p['plan_only_steps'] for p in plans)}/{sum(r['steps'] for r in rows)} "
         f"({sum(p.get('budget_credit', 0) for p in plans)} not counted against max_steps)"
+    )
+
+
+def _render_mixed(mixed: dict[str, Counter[str]]) -> str:
+    return "; ".join(
+        f"{k}: " + ", ".join(f"{v} {n}" for v, n in c.most_common()) for k, c in mixed.items()
     )
 
 
@@ -925,6 +981,8 @@ def summarize(variant_dir: Path) -> str:
                 else ""
             )
         )
+    if mixed := _mixed_conditions(rows):
+        lines.append(f"- MIXED CONDITIONS, not one variant: {_render_mixed(mixed)}")
     truncated = len(rows) - n
     if truncated or errs:
         classes = Counter(e["class"] for e in errs)

@@ -695,12 +695,23 @@ Quality loss is measured on the two low-budget tasks: the same tasks with
 
 ### Commits
 
-0. S5 follow-ups:
-   - fix the two regexes (`.replace(` with a single argument; the builtin `compile(`,
-     not `re.compile`);
-   - add realistic patch and parse scripts to the corpus (auto: allow);
-   - make `policy_eval` count false denies;
-   - make the harness refuse a variant that mixes sandbox backends.
+0. S5 follow-ups (done):
+   - fix the two regexes: `.replace(`/`.rename(` count as moves only with one argument
+     (or `target=`), and the builtins `compile(`/`eval(`/`exec(`/`system(` are flagged,
+     but not methods with the same names;
+   - add 15 corpus cases taken from the transcripts. Benign: patch and parse scripts,
+     pandas `replace`/`rename`/`eval`, `platform.system()`. Must still deny: `import
+     os as o`, `from os import replace`, `Path('.git').replace/rename`, `builtins.exec`.
+     `policy_eval` already gated mismatches and counted friction; it was missing the
+     cases. They also caught an existing dangerous allow: `from os import replace;
+     replace('.git', ...)` was allowed in auto mode. Now: 158 cases, 0 dangerous
+     allows, auto refusals of benign commands 6 → 0;
+   - the harness treats a variant as one condition (harness hash, model, effort,
+     memory, policy, sandbox). A trial that differs goes to `errors.jsonl` as
+     `condition_mismatch` and stops the suite. A variant that is already mixed can't
+     be resumed, and its summary says `MIXED CONDITIONS`. Old variants flagged:
+     `s5-full` (sandbox none 6 / bwrap 36) and `baseline` (two harness versions,
+     15 / 9 trials, from tasks added mid-variant).
 1. S6 evals: the three tasks with oracle/wrong/alt, context fields in eval rows,
    `context_overflow` grading, and the fake API's compaction and overflow emulation.
 2. Accounting, result caps, `read_output`, and their events and spans.
@@ -710,8 +721,9 @@ Quality loss is measured on the two low-budget tasks: the same tasks with
 ### The S6 experiment (VM; costs money)
 
 ```bash
-uv run python -m evals.run_evals run --reps 3 --variant s5-fix \
+uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s5-fix \
   --tasks add-version-flag,two-bugs,log-error-triage          # commit 0: blocks gone?
+uv run python -m evals.run_evals compare s5-full s5-fix        # expect 0 code-* blocks
 uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s6-full
 KAMA_CONTEXT=false uv run python -m evals.run_evals run --reps 3 --variant s6-off
 uv run python -m evals.run_evals compare s6-off s6-full

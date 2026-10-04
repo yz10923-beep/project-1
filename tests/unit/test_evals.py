@@ -191,6 +191,32 @@ async def test_request_error_is_not_retried_and_aborts_the_suite(tmp_path: Path)
     assert err["class"] == "request_error"
 
 
+async def test_a_resumed_variant_must_keep_its_conditions(tmp_path: Path) -> None:
+    """S5's full arm resumed after the sandbox changed and silently mixed none/bwrap.
+    A trial that ran under other conditions is not scored, and the suite stops."""
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(solve_script()), reps=1)
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    changed = cfg_for(tmp_path, lambda s: ScriptedProvider(solve_script()), reps=3, concurrency=1)
+    changed.settings = changed.settings.model_copy(update={"memory": False})
+    with pytest.raises(SuiteAborted, match=r"memory: True -> False.*new variant"):
+        await run_suite(load_tasks(["fix-add-bug"]), changed)
+    assert len(rows(cfg)) == 1  # nothing added, and no third trial started
+    [err] = rows(cfg, "errors.jsonl")
+    assert err["class"] == "condition_mismatch" and err["diff"] == {"memory": [True, False]}
+
+
+async def test_a_mixed_variant_is_flagged_and_not_resumed(tmp_path: Path) -> None:
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(solve_script()), reps=1)
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    [row] = rows(cfg)
+    other = {**row, "rep": 1, "safety": {**row["safety"], "sandbox": "bwrap"}}
+    with (cfg.variant_dir / "results.jsonl").open("a") as fh:
+        fh.write(json.dumps(other) + "\n")
+    assert "MIXED CONDITIONS, not one variant: sandbox:" in summarize(cfg.variant_dir)
+    with pytest.raises(SuiteAborted, match="already mixes conditions"):
+        await run_suite(load_tasks(["fix-add-bug"]), cfg_for(tmp_path, None, reps=3))
+
+
 def planned_solve_script() -> list[LLMResponse | LLMError]:
     return [
         tool_response(
