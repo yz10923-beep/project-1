@@ -565,6 +565,10 @@ What the run found:
   variants that ran identical memory code (s4-mem2, s4-full, s5-off, s5-full): 8/12.
   That's noise around a defensible re-check of a close call (410 vs 390), not S5.
 
+A 9-trial rerun of the three tasks on the same code (`s5-rerun-oldcode`, harness
+7146b222, run from a branch without the fix) blocked 9/9 again by the same rules. The
+false positives are deterministic, not occasional.
+
 Decision: the policy stays on. It costs nothing where it doesn't misfire, and the two
 misfires are bugs, not design. Fixed first thing in S6 (commit 0 below), with a 9-trial
 confirmation run on the three affected tasks.
