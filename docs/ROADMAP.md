@@ -583,8 +583,27 @@ add-version-flag's 7 steps are extra verification and a note, not the policy: 0 
 0 tool errors, and s4-full ran 5-7 steps on the same task.
 
 Decision: the policy stays on. It costs nothing where it doesn't misfire, and the two
-misfires are bugs, not design. Fixed first thing in S6 (commit 0 below), with a 9-trial
-confirmation run on the three affected tasks.
+misfires are bugs, not design. Fixed in the S5 follow-ups below and confirmed by the
+`s5-fix` run above.
+
+### S5 follow-ups (done)
+
+- fix the two regexes: `.replace(`/`.rename(` count as moves only with one argument
+  (or `target=`), and the builtins `compile(`/`eval(`/`exec(`/`system(` are flagged,
+  but not methods with the same names;
+- add 15 corpus cases taken from the transcripts. Benign: patch and parse scripts,
+  pandas `replace`/`rename`/`eval`, `platform.system()`. Must still deny: `import
+  os as o`, `from os import replace`, `Path('.git').replace/rename`, `builtins.exec`.
+  `policy_eval` already gated mismatches and counted friction; it was missing the
+  cases. They also caught an existing dangerous allow: `from os import replace;
+  replace('.git', ...)` was allowed in auto mode. Now: 158 cases, 0 dangerous
+  allows, auto refusals of benign commands 6 → 0;
+- the harness treats a variant as one condition (harness hash, model, effort,
+  memory, policy, sandbox). A trial that differs goes to `errors.jsonl` as
+  `condition_mismatch` and stops the suite. A variant that is already mixed can't
+  be resumed, and its summary says `MIXED CONDITIONS`. Old variants flagged:
+  `s5-full` (sandbox none 6 / bwrap 36) and `baseline` (two harness versions,
+  15 / 9 trials, from tasks added mid-variant).
 
 ## S6 plan: context governance
 
@@ -716,26 +735,11 @@ thousands of tokens at most. S6 needs new tasks that force growth.
 Quality loss is measured on the two low-budget tasks: the same tasks with
 `KAMA_CONTEXT=false`, where the whole history still fits in the 1M window.
 
-### Commits
+### S6 parts
 
-0. S5 follow-ups (done):
-   - fix the two regexes: `.replace(`/`.rename(` count as moves only with one argument
-     (or `target=`), and the builtins `compile(`/`eval(`/`exec(`/`system(` are flagged,
-     but not methods with the same names;
-   - add 15 corpus cases taken from the transcripts. Benign: patch and parse scripts,
-     pandas `replace`/`rename`/`eval`, `platform.system()`. Must still deny: `import
-     os as o`, `from os import replace`, `Path('.git').replace/rename`, `builtins.exec`.
-     `policy_eval` already gated mismatches and counted friction; it was missing the
-     cases. They also caught an existing dangerous allow: `from os import replace;
-     replace('.git', ...)` was allowed in auto mode. Now: 158 cases, 0 dangerous
-     allows, auto refusals of benign commands 6 → 0;
-   - the harness treats a variant as one condition (harness hash, model, effort,
-     memory, policy, sandbox). A trial that differs goes to `errors.jsonl` as
-     `condition_mismatch` and stops the suite. A variant that is already mixed can't
-     be resumed, and its summary says `MIXED CONDITIONS`. Old variants flagged:
-     `s5-full` (sandbox none 6 / bwrap 36) and `baseline` (two harness versions,
-     15 / 9 trials, from tasks added mid-variant).
-1. S6 evals (done):
+S6 lands in four parts, committed as `S6 (n/4): ...` like S5's three.
+
+1. **S6 (1/4): evals first** (done):
    - **Tasks:** `big-log-triage`, `long-session-recall` and `long-refactor`, each with
      oracle, wrong and alt solutions. Every wrong answer fails on exactly its own part.
      The low-budget tasks use 12000 tokens: the fixed prompt (system prompt and tools)
@@ -749,20 +753,20 @@ Quality loss is measured on the two low-budget tasks: the same tasks with
      run header prints the code, the harness hash and the context setting.
      `KAMA_CONTEXT` is part of a variant's conditions.
    - **Fake API:** `FAKE_API_MAX_PROMPT_CHARS` answers "prompt is too long". Compaction
-     emulation moves to commit 3, where something uses it.
+     emulation moves to part 3, where something uses it.
    - **Settings:** `KAMA_CONTEXT`, `KAMA_CONTEXT_BUDGET` and
-     `KAMA_TOOL_RESULT_MAX_CHARS` exist. They take effect in commits 2 and 3.
-2. Accounting, result caps, `read_output`, and their events and spans.
-3. On-demand compaction, resume, replay and sessions; the fake API emulates compaction;
-   a low-budget trial with no compaction is reported "not exercised" (errors.jsonl).
-4. Trace curve, TUI meter, CLI summary, docs and interview points.
+     `KAMA_TOOL_RESULT_MAX_CHARS` exist. They take effect in parts 2 and 3.
+2. **S6 (2/4): accounting and result caps**: the token meter, caps that keep the full
+   output, `read_output`, and their events and spans.
+3. **S6 (3/4): compaction**: on-demand compaction, resume, replay and sessions; the
+   fake API emulates compaction; a low-budget trial with no compaction is reported
+   "not exercised" (errors.jsonl).
+4. **S6 (4/4): observability and docs**: the trace curve, TUI meter, CLI summary,
+   docs and interview points.
 
 ### The S6 experiment (VM; costs money)
 
 ```bash
-uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s5-fix \
-  --tasks add-version-flag,two-bugs,log-error-triage          # commit 0: blocks gone?
-uv run python -m evals.run_evals compare s5-full s5-fix        # expect 0 code-* blocks
 uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s6-full
 KAMA_CONTEXT=false uv run python -m evals.run_evals run --reps 3 --variant s6-off
 uv run python -m evals.run_evals compare s6-off s6-full
