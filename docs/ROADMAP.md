@@ -569,6 +569,19 @@ A 9-trial rerun of the three tasks on the same code (`s5-rerun-oldcode`, harness
 7146b222, run from a branch without the fix) blocked 9/9 again by the same rules. The
 false positives are deterministic, not occasional.
 
+**Confirmed after the fix** (`s5-fix`, harness af5fe215, bwrap, 9 trials): 0 blocks,
+9/9 pass. Medians against `s5-full` → `s5-fix`:
+
+| task | steps | cost |
+|---|---|---|
+| log-error-triage | 13 → 9 | $0.212 → $0.169 |
+| two-bugs | 6 → 4 | $0.089 → $0.066 |
+| add-version-flag | 7 → 7 | $0.097 → $0.085 |
+
+log-error-triage and two-bugs are back at `s5-off` levels (9 and 4 steps).
+add-version-flag's 7 steps are extra verification and a note, not the policy: 0 blocks,
+0 tool errors, and s4-full ran 5-7 steps on the same task.
+
 Decision: the policy stays on. It costs nothing where it doesn't misfire, and the two
 misfires are bugs, not design. Fixed first thing in S6 (commit 0 below), with a 9-trial
 confirmation run on the three affected tasks.
