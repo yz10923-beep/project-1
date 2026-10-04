@@ -428,19 +428,34 @@ DANGER_WORDS = re.compile(
     r"subprocess|spawn|eval|exec|urllib|requests|socket|https?|base64)\b|-delete|\.git\b|\.env\b|"
     r"\.kama\b|\.ssh\b|>\s*/|reset\s+--hard|clean\s+-\w*f|push\s+.*(-f|--force)"
 )
+# One argument (positional or `target=`): Path.replace / Path.rename move a file;
+# str.replace(old, new) and pandas' replace({...}) / rename(columns=...) don't.
+_ONE_ARG = (
+    r"\(\s*(?!(?!target\b)\w+\s*=)"  # no keyword argument other than target=
+    r"""(?:'[^']*'|"[^"]*"|\([^()]*\)|\[[^\[\]]*\]|[^,()'"{}\[\]])*\)"""  # no top-level comma
+)
 CODE_DELETE = re.compile(
     r"rmtree|os\.remove|os\.unlink|\.unlink\(|\brmdir\b|removedirs|send2trash|shutil\.move|"
-    r"os\.rename|os\.replace|\.rename\(|\.replace\(|fs\.rm|fs\.unlink|rimraf|\bunlink\b|truncate|"
-    r"rmSync|rmdirSync|unlinkSync|renameSync|\brm_rf\b|\brm_r\b|FileUtils|File\.delete|remove_tree"
+    r"os\.rename|os\.replace|\.(?:rename|replace)" + _ONE_ARG + r"|fs\.rm|fs\.unlink|rimraf|"
+    r"\bunlink\b|truncate|rmSync|rmdirSync|unlinkSync|renameSync|\brm_rf\b|\brm_r\b|FileUtils|"
+    r"File\.delete|remove_tree|"
+    # File operations imported by name: `from os import replace; replace(a, b)`.
+    r"\bfrom\s+(?:os|shutil)\s+import\b[^\n;]*\b(?:replace|renames?|remove|unlink|rmtree|move)\b"
 )
+# `import os as o` hides `o.replace(a, b)` from the patterns above: with an alias in the
+# code, any replace/rename/remove/move call counts as one.
+CODE_OS_ALIAS = re.compile(r"\bimport\s+(?:os|shutil)\s+as\s+\w+")
+CODE_ALIASED_DELETE = re.compile(r"\.(?:replace|renames?|remove|unlink|rmtree|move)\s*\(")
 CODE_WRITE = re.compile(
     r"""open\([^)]*['"][wax+]|write_text|write_bytes|\.write\(|shutil\.copy|copyfile|mkdir|"""
     r"makedirs|\.touch\(|writeFile|appendFile"
 )
 CODE_EXEC = re.compile(
     r"subprocess|os\.system|os\.popen|os\.exec|os\.spawn|Popen|pty\.spawn|child_process|"
-    r"execSync|spawnSync|\bsystem\s*\(|\bexec\s*\(|\beval\s*\(|__import__|getattr\s*\(|"
-    r"importlib|compile\s*\(|b64decode|codecs\.decode|\bctypes\b"
+    r"execSync|spawnSync|__import__|getattr\s*\(|importlib|b64decode|codecs\.decode|\bctypes\b|"
+    # The builtins, not methods that share their names (re.compile, df.eval,
+    # platform.system, regex.exec): those stay unflagged.
+    r"(?<![\w.])(?:system|exec|eval|compile)\s*\(|\bbuiltins\b|__builtins__"
 )
 CODE_NETWORK = re.compile(
     r"urllib|requests|http\.client|httpx|aiohttp|\bsocket\b|urlopen|\bfetch\s*\(|axios|"
@@ -1136,7 +1151,9 @@ class _Walker:
         literals = [m.group(2) for m in _STRING_LITERAL.finditer(code)]
         infos = [classify(s, cwd, self.ctx) for s in literals if s and len(s) < 300]
         touched = [i for i in infos if i.kind in {"protected", "outside", "sensitive"}]
-        deletes = CODE_DELETE.search(code)
+        deletes = CODE_DELETE.search(code) or (
+            CODE_OS_ALIAS.search(code) and CODE_ALIASED_DELETE.search(code)
+        )
         writes = CODE_WRITE.search(code)
         if CODE_NETWORK.search(code):
             self.add("network", f"{prog} code uses the network", text)
