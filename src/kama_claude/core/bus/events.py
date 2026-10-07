@@ -245,8 +245,39 @@ class RunFinishedEvent(_RunEvent):
     approvals_asked: int = 0
     llm_retries: int = 0
     tool_errors: dict[str, int] = Field(default_factory=dict, description="By error kind.")
-    # S6: the largest request the run sent, in tokens (input + cache read + cache write).
+    # S6: the largest request the run sent, in tokens (input + cache read + cache write),
+    # and how many times the history was compacted.
     context_peak: int = 0
+    compactions: int = 0
+
+
+class ContextCompactedEvent(_RunEvent):
+    """S6: the history outgrew the budget and was summarized server-side (on-demand
+    compaction). From here the conversation is [assistant: block] + the `resume` user
+    turn, then whatever follows; replay rebuilds exactly that. The block is stored as
+    the API returned it: its signature must reach the API unchanged."""
+
+    type: Literal["context.compacted"] = "context.compacted"
+    step: int
+    block: dict[str, Any]
+    resume: str = Field(description="The user turn after the block: goal and plan, re-stated.")
+    tokens_before: int
+    measured: Literal["estimate", "count"]
+    messages_replaced: int
+    usage: Usage
+    latency_ms: int
+    model: str = ""
+
+
+class ContextCompactionFailedEvent(_RunEvent):
+    """S6: a compaction was needed but no summary came back (cut off, refused, an API
+    error after retries). The run continues on the full history and tries again later."""
+
+    type: Literal["context.compaction_failed"] = "context.compaction_failed"
+    step: int
+    tokens_before: int
+    reason: str
+    usage: Usage = Field(default_factory=Usage)
 
 
 Event = Annotated[
@@ -264,6 +295,8 @@ Event = Annotated[
     | PlanReminderEvent
     | PlanNoticeEvent
     | NoteUpdatedEvent
+    | ContextCompactedEvent
+    | ContextCompactionFailedEvent
     | RunFinishedEvent
     | LLMDeltaEvent,
     Field(discriminator="type"),

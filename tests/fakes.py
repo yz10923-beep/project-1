@@ -121,3 +121,35 @@ class PausingProvider(ScriptedProvider):
         return await super().complete(
             system=system, messages=messages, tools=tools, on_text=on_text
         )
+
+
+def compaction_response(summary: str = "Summary: the work so far.") -> LLMResponse:
+    """What on-demand compaction returns: one signed block, stop_reason "compaction", and
+    the summarizer's usage (the API reports it in usage.iterations)."""
+    return LLMResponse(
+        stop_reason="compaction",
+        content=[{"type": "compaction", "content": summary, "signature": "sig-" + summary[:8]}],
+        usage=Usage(input_tokens=900, output_tokens=120),
+    )
+
+
+@dataclass
+class CompactingProvider(ScriptedProvider):
+    """A ScriptedProvider that can also compact (S6): `compactions` are its answers to
+    compaction requests, in order; `compact_requests` records what it was asked to
+    summarize. Its model is one the API compacts for, so build_loop turns compaction on."""
+
+    model: str = "claude-opus-5"
+    compactions: list[LLMResponse | LLMError] = field(default_factory=list)
+    compact_requests: list[Request] = field(default_factory=list)
+    instructions: list[str] = field(default_factory=list)
+
+    async def compact(
+        self, *, system: str, messages: list[Message], tools: list[ToolSpec], instructions: str
+    ) -> LLMResponse:
+        self.compact_requests.append(Request(system, copy.deepcopy(messages), tools))
+        self.instructions.append(instructions)
+        item = self.compactions.pop(0) if self.compactions else compaction_response()
+        if isinstance(item, LLMError):
+            raise item
+        return item.model_copy(update={"model": self.model})

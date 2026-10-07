@@ -30,10 +30,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from kama_claude.core.agent.history import start_run_messages
+from kama_claude.core.agent.history import compacted_view, resume_text, start_run_messages
 from kama_claude.core.agent.prompts import system_prompt
 from kama_claude.core.agent.sinks import EventSink
 from kama_claude.core.bus.events import (
+    ContextCompactedEvent,
+    ContextCompactionFailedEvent,
     LLMDeltaEvent,
     LLMResponseEvent,
     LLMRetryEvent,
@@ -50,10 +52,22 @@ from kama_claude.core.bus.events import (
     ToolPolicyEvent,
     ToolStartedEvent,
 )
-from kama_claude.core.context import ContextMeter, TokenCounter
+from kama_claude.core.context import (
+    COMPACTION_INSTRUCTIONS,
+    Compactor,
+    ContextMeter,
+    TokenCounter,
+)
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.retry import NO_RETRY, RetryPolicy
-from kama_claude.core.llm.types import LLMError, LLMProvider, Message, ToolCall, Usage
+from kama_claude.core.llm.types import (
+    LLMError,
+    LLMProvider,
+    LLMResponse,
+    Message,
+    ToolCall,
+    Usage,
+)
 from kama_claude.core.notes import NoteBook, NoteStore
 from kama_claude.core.outputs import LINE_MAX_CHARS, OutputStore
 from kama_claude.core.plan import (
@@ -94,6 +108,7 @@ type RememberRules = Callable[[tuple[Rule, ...]], Awaitable[None]]
 DENIED_MESSAGE = "The user denied this tool call. Do not retry it; choose another approach or stop."
 # The same failing call again and again is a loop, not progress.
 REPEAT_FAILURE_LIMIT = 3
+COMPACT_RETRY_STEPS = 3  # after a failed compaction, steps before trying again (S6)
 
 
 def denied_by_user(reason: str) -> str:
@@ -167,6 +182,13 @@ class _RunState:
     denied_rules: set[str] = field(default_factory=set)
     # S6: request sizes (measured with KAMA_CONTEXT on or off; only S6 acts on them)
     meter: ContextMeter = field(default_factory=lambda: ContextMeter(120_000))
+    compactions: int = 0
+    compact_after: int = 0  # after a failed compaction, wait until this step to retry
+    # The first request after a compaction. If even that is over the budget (a huge goal,
+    # a long summary), compacting again can't help until the context grows past it:
+    # without this floor every step would pay for another summary.
+    compact_floor: int = 0
+    measure_floor: bool = False
 
     @property
     def budget_used(self) -> int:
@@ -217,6 +239,7 @@ class AgentLoop:
         outputs: OutputStore | None = None,
         max_result_chars: int = MAX_RESULT_CHARS,
         context_budget: int = 120_000,
+        compaction: bool = False,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -232,6 +255,10 @@ class AgentLoop:
             max_line_chars=LINE_MAX_CHARS if outputs is not None else None,
         )
         self._context_budget = context_budget
+        # S6: compact when the next request would exceed the budget (needs a provider
+        # that can, and a model the API compacts for; off = the history just grows)
+        self._compaction = compaction and isinstance(provider, Compactor)
+        self._goal = ""
         self._ctx = self._base_ctx
         # S5: None = the S4 approvals (ask for every requires_approval tool).
         self._policy = policy
@@ -344,6 +371,7 @@ class AgentLoop:
     ) -> RunResult:
         t0 = time.monotonic()
         self._seq = 0
+        self._goal = goal
         book = (
             NoteBook(self._notes, self._ctx.workspace, session_id, run_id)
             if self._memory and self._notes is not None
@@ -395,6 +423,7 @@ class AgentLoop:
                     llm_retries=state.llm_retries,
                     tool_errors=dict(state.tool_errors),
                     context_peak=state.meter.peak,
+                    compactions=state.compactions,
                 )
             )
             return RunResult(run_id, status, text, state.steps, state.usage, error, retryable)
@@ -441,6 +470,8 @@ class AgentLoop:
         step = state.steps
         state.last_step_plan_only = False
         await self._deliver_notices(run_id, step, messages)
+        if self._compaction:
+            await self._maybe_compact(run_id, step, state, system, tools, messages)
 
         async def on_text(text: str) -> None:
             await self._sink.emit(LLMDeltaEvent(run_id=run_id, step=step, text=text))
@@ -463,6 +494,8 @@ class AgentLoop:
                 else:
                     usage = resp.usage.model_dump()
                     size = state.meter.observe(resp.usage, len(messages))
+                    if state.measure_floor:
+                        state.compact_floor, state.measure_floor = size, False
                     llm_span.set(context_tokens=size, context_estimate=estimate)
                     llm_span.set(
                         model=resp.model,
@@ -536,6 +569,101 @@ class AgentLoop:
                 return _Finish("context_overflow", resp.text, "the model's context window is full")
             case _:
                 return _Finish("error", resp.text, f"unexpected stop_reason: {resp.stop_reason}")
+
+    async def _maybe_compact(
+        self,
+        run_id: str,
+        step: int,
+        state: _RunState,
+        system: str,
+        tools: list[dict[str, Any]],
+        messages: list[Message],
+    ) -> None:
+        """Summarize the history server-side when the next request would exceed the budget.
+
+        Only at a step boundary: here the last message is the user turn (goal, tool
+        results), never an assistant turn waiting on tool results. The whole history is
+        summarized and nothing older is replayed, so no thinking block outlives the
+        prefix it was made in. Messages are replaced in place; the event lets replay
+        do the same."""
+        if not state.meter.sizes or step < state.compact_after or messages[-1]["role"] != "user":
+            return
+        tokens, how = await state.meter.measure(system, tools, messages)
+        if tokens <= max(self._context_budget, state.compact_floor + self._context_budget // 4):
+            return
+        assert isinstance(self._provider, Compactor)
+        t0 = time.monotonic()
+        resp: LLMResponse | None = None
+        failure = ""
+        with self._tracer.span(
+            "context.compact", "llm", step=step, tokens_before=tokens, measured=how
+        ) as span:
+            attempt, waited = 0, 0.0
+            while True:
+                attempt += 1
+                try:
+                    resp = await self._provider.compact(
+                        system=system,
+                        messages=messages,
+                        tools=tools,
+                        instructions=COMPACTION_INSTRUCTIONS,
+                    )
+                    break
+                except LLMError as e:
+                    delay = self._retry.delay(e, attempt)
+                    if not self._retry.should_retry(e, attempt, waited, delay):
+                        failure = f"{e.kind}: {e}"
+                        break
+                    await self._sleep(delay)
+                    waited += delay
+            block = (
+                resp.content[0]
+                if resp is not None
+                and resp.stop_reason == "compaction"
+                and resp.content
+                and resp.content[0].get("type") == "compaction"
+                else None
+            )
+            usage = resp.usage if resp is not None else Usage()
+            state.usage = state.usage + usage
+            span.set(cost_usd=cost_usd(resp.model if resp else "", usage.model_dump()))
+            if block is None:
+                failure = failure or f"no summary (stop_reason {resp.stop_reason if resp else '?'})"
+                span.fail(failure)
+        if block is None:
+            state.compact_after = step + COMPACT_RETRY_STEPS
+            await self._sink.emit(
+                ContextCompactionFailedEvent(
+                    **self._meta(run_id),
+                    step=step,
+                    tokens_before=tokens,
+                    reason=failure,
+                    usage=usage,
+                )
+            )
+            return
+        assert resp is not None
+        plan = self._ctx.plan.render() if self._ctx.plan.tasks else None
+        resume = resume_text(self._goal, plan, read_output=self._ctx.outputs is not None)
+        replaced = len(messages)
+        messages[:] = compacted_view(block, resume)
+        state.compactions += 1
+        state.meter.restart()
+        state.measure_floor = True
+        await self._sink.emit(
+            ContextCompactedEvent(
+                **self._meta(run_id),
+                step=step,
+                block=block,
+                resume=resume,
+                tokens_before=tokens,
+                measured=how,  # type: ignore[arg-type]  # "estimate" | "count"
+                messages_replaced=replaced,
+                usage=usage,
+                latency_ms=_ms_since(t0),
+                model=resp.model,
+            )
+        )
 
     async def _remind_open_tasks(
         self, run_id: str, state: _RunState, messages: list[Message]

@@ -14,7 +14,7 @@ import anthropic
 from kama_claude.core.agent.loop import AgentLoop, Approver, RememberRules, RunResult
 from kama_claude.core.agent.sinks import EventSink, FanoutSink, JsonlEventWriter
 from kama_claude.core.config import Settings
-from kama_claude.core.llm.anthropic_provider import AnthropicProvider
+from kama_claude.core.llm.anthropic_provider import AnthropicProvider, supports_compaction
 from kama_claude.core.llm.retry import RetryPolicy
 from kama_claude.core.llm.types import LLMProvider, Message
 from kama_claude.core.notes import NoteStore, memory_preamble
@@ -183,8 +183,9 @@ def build_loop(
     tools += note_tools() if settings.memory else []
     tools += output_tools() if outputs is not None else []
     keep = frozenset(k.strip() for k in settings.bash_env_keep.split(",") if k.strip())
+    provider = provider or make_provider(settings)
     return AgentLoop(
-        provider=provider or make_provider(settings),
+        provider=provider,
         registry=ToolRegistry(tools),
         sink=sink,
         workspace=workspace,
@@ -203,6 +204,8 @@ def build_loop(
         if outputs is not None
         else MAX_RESULT_CHARS,
         context_budget=settings.context_budget,
+        # S6: on-demand compaction, for models the API compacts for
+        compaction=outputs is not None and supports_compaction(provider.model),
     )
 
 

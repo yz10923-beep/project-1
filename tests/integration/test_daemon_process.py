@@ -18,7 +18,9 @@ from tests.conftest import Daemon, free_port, spawn_daemon
 
 
 @contextlib.contextmanager
-def fake_stack_with(faults: str = "", **api_env: str) -> Iterator[Daemon]:
+def fake_stack_with(
+    faults: str = "", daemon_env: dict[str, str] | None = None, **api_env: str
+) -> Iterator[Daemon]:
     """A real kama-core whose model is scripts/fake_api.py (fast mode) over HTTP; `faults`
     makes its first requests fail (see FAKE_API_FAULTS in the script)."""
     api_port = free_port()
@@ -31,7 +33,11 @@ def fake_stack_with(faults: str = "", **api_env: str) -> Iterator[Daemon]:
     assert api.stdout is not None and "listening" in api.stdout.readline()
     d = spawn_daemon(
         free_port(),
-        {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{api_port}", "ANTHROPIC_API_KEY": "fake"},
+        {
+            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{api_port}",
+            "ANTHROPIC_API_KEY": "fake",
+            **(daemon_env or {}),
+        },
     )
     try:
         yield d
@@ -248,3 +254,24 @@ def test_a_prompt_past_the_window_ends_the_run_as_context_overflow(tmp_path: Pat
     run_dir = Path(out.stdout.rsplit("events: ", 1)[1].strip()).parent
     finished = json.loads((run_dir / "events.jsonl").read_text().splitlines()[-1])
     assert (finished["type"], finished["status"]) == ("run.finished", "context_overflow")
+
+
+def test_a_session_past_its_budget_is_compacted_over_the_real_sdk(tmp_path: Path) -> None:
+    """S6, end to end: the meter counts exactly near the budget, the daemon compacts at
+    a step boundary, and the next request carries the block first with the beta header
+    (the fake API answers 400 otherwise, as the real one does). The run still finishes
+    its plan."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    with fake_stack_with(
+        daemon_env={"KAMA_CONTEXT_BUDGET": "10000"}, FAKE_API_TOKENS_PER_CHAR="5"
+    ) as d:
+        out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
+    assert out.returncode == 0, out.stderr + out.stdout
+    assert "⇣ context compacted:" in out.stdout and "plan: 2/2 completed" in out.stdout
+    run_dir = Path(out.stdout.rsplit("events: ", 1)[1].strip()).parent
+    events = [json.loads(x) for x in (run_dir / "events.jsonl").read_text().splitlines()]
+    [compacted] = [e for e in events if e["type"] == "context.compacted"]
+    assert compacted["measured"] == "count" and compacted["tokens_before"] > 10_000
+    assert compacted["block"]["signature"].startswith("fake:")
+    assert (events[-1]["status"], events[-1]["compactions"]) == ("completed", 1)

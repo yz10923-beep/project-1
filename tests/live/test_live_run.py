@@ -41,3 +41,23 @@ async def test_agent_fixes_a_bug_and_verifies(tmp_path: Path) -> None:
     assert result.status == "completed", (run_dir / "events.jsonl").read_text()[-2000:]
     assert "a + b" in (tmp_path / "calc.py").read_text()
     assert result.steps <= 8
+
+
+async def test_real_compaction_round_trip(tmp_path: Path) -> None:
+    """S6 against the real API: our compaction request (same system, tools, effort and
+    caching as the conversation) is accepted, the block comes back signed, and a run
+    continues from it with the beta header. Small budget, so it compacts on step 2."""
+    (tmp_path / "data.txt").write_text("".join(f"row {i}: value {i * 7}\n" for i in range(3000)))
+    settings = SETTINGS.model_copy(update={"context_budget": 10_000, "runs_dir": tmp_path / "runs"})
+    result, run_dir = await run_goal(
+        "Read data.txt with read_file (all of it, in pages of 1000 lines), then tell me the "
+        "value on row 2999. Remember: the answer is on the last row.",
+        settings=settings,
+        workspace=tmp_path,
+        approver=allow,
+        mode="auto",
+    )
+    events = (run_dir / "events.jsonl").read_text()
+    assert '"type":"context.compacted"' in events.replace(" ", ""), events[-3000:]
+    assert result.status == "completed", events[-2000:]
+    assert "20993" in result.final_text

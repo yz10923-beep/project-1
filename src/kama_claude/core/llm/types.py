@@ -25,6 +25,7 @@ StopReason = Literal[
     "max_tokens",
     "stop_sequence",
     "pause_turn",
+    "compaction",  # S6: an on-demand compaction request returned its summary block
     "refusal",
     "model_context_window_exceeded",
     "other",

@@ -776,9 +776,39 @@ S6 lands in four parts, committed as `S6 (n/4): ...` like S5's three.
    - **Rows:** `context.cut_results`, `chars_cut` and `read_output_calls`.
    - **Context off** changes nothing the model sees: the same tools, the S1 middle cut,
      no outputs dir. Tested byte for byte against `truncate_middle`.
-3. **S6 (3/4): compaction**: on-demand compaction, resume, replay and sessions; the
-   fake API emulates compaction; a low-budget trial with no compaction is reported
-   "not exercised" (errors.jsonl).
+3. **S6 (3/4): compaction** (done):
+   - **When.** At the start of a step (after plan notices are delivered, so they're
+     summarized too), if the run has had a response and the meter puts the next
+     request over the budget (an exact count near it). Never mid tool round: the last
+     message is always the user turn.
+   - **How.** `provider.compact()`: the same model, system, tools, effort and caching
+     as the conversation, `compaction: {type: summarize, instructions}`, beta
+     `compact-2026-09-04`, and no fallbacks. The instructions say what to keep exactly
+     (numbers, ids, paths, conventions such as signs and defaults, cut-output ids,
+     what's left). Retryable errors (529 `compaction_unavailable`) go through the
+     `RetryPolicy`.
+   - **Then.** The messages become `[assistant: block]` + a resume turn that restates
+     the goal verbatim and the plan from the run's own records. A durable
+     `context.compacted` event stores the block exactly as returned, so `replay()`, and
+     with it the next run of a session, starts from the same view. Every request that
+     carries the block sends the beta header (`count_tokens` too).
+   - **No summary** (cut off, refused, `end_turn` without text, errors after retries):
+     `context.compaction_failed`; the run continues on the full history and tries
+     again 3 steps later.
+   - **Billing:** usage is summed over `usage.iterations` (the top level is 0 on a
+     compaction call) and added to the run, the trace span and the eval row.
+   - **A bug found by the tests:** if the first request after a compaction is still
+     over the budget (a huge goal, a long summary), the loop compacted again every
+     step and paid for a summary each time. Now the next compaction waits until the
+     context grows a quarter of the budget past that first request.
+   - **Evals: no "not exercised" exclusion** (a change from the plan). Dropping
+     low-budget trials that never compacted would score the on arm on its hardest
+     trials only, against every trial of the off arm. Every trial is scored; the
+     summary adds "compacted in k/n trials · passed when compacted x/k".
+   - **Offline:** the fake API emulates it all (the header is required, the block must
+     come first, sizes scale with `FAKE_API_TOKENS_PER_CHAR`, `count_tokens`). An
+     integration test compacts a daemon run over the real SDK. `make live` has a real
+     round trip (`test_real_compaction_round_trip`).
 4. **S6 (4/4): observability and docs**: the trace curve, TUI meter, CLI summary,
    docs and interview points.
 

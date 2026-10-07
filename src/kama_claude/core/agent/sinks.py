@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import IO, Protocol, TextIO
 
 from kama_claude.core.bus.events import (
+    ContextCompactedEvent,
+    ContextCompactionFailedEvent,
     Event,
     LLMDeltaEvent,
     LLMResponseEvent,
@@ -155,6 +157,14 @@ class ConsolePrinter:
             case PlanReminderEvent():
                 n = len(event.open_task_ids)
                 self._p(f"  ! stopped with {n} open task(s); reminding the model of its plan")
+            case ContextCompactedEvent():
+                summary = str(event.block.get("content") or "")
+                self._p(
+                    f"  ⇣ context compacted: {event.tokens_before / 1000:.1f}K tokens "
+                    f"({event.messages_replaced} messages) → a {len(summary)}-char summary"
+                )
+            case ContextCompactionFailedEvent():
+                self._p(f"  ! compaction failed ({event.reason}); continuing on the full history")
             case ToolStartedEvent() if event.name in PLAN_TOOL_NAMES:
                 pass  # the plan lines below say what changed
             case ToolFinishedEvent() if event.name in PLAN_TOOL_NAMES and not event.is_error:

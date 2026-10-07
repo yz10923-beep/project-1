@@ -28,6 +28,20 @@ from kama_claude.core.llm.types import (
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 _FALLBACK_MODELS = ("claude-opus-5", "claude-fable-5-1")
 
+# S6: on-demand compaction (the server writes the summary). The header goes on the
+# compaction request and on every later request that carries the returned block.
+COMPACTION_BETA = "compact-2026-09-04"
+_COMPACTION_MODELS = (
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-5",  # also opus-5-5
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",  # also sonnet-5-5
+    "claude-sonnet-4-6",
+)
+
 # Models that reject `output_config.effort` with a 400.
 _NO_EFFORT_MODELS = ("claude-haiku-4-5", "claude-sonnet-4-5")
 
@@ -38,6 +52,18 @@ logger = logging.getLogger(__name__)
 
 def supports_refusal_fallback(model: str) -> bool:
     return model.startswith(_FALLBACK_MODELS)
+
+
+def supports_compaction(model: str) -> bool:
+    return model.startswith(_COMPACTION_MODELS)
+
+
+def carries_compaction(messages: list[Message]) -> bool:
+    """Does the history hold a compaction block? (It is always the first block.)"""
+    if not messages or not isinstance(messages[0]["content"], list):
+        return False
+    first = messages[0]["content"][:1]
+    return bool(first) and first[0].get("type") == "compaction"
 
 
 def supports_effort(model: str) -> bool:
@@ -102,16 +128,23 @@ def retry_after(headers: Mapping[str, str]) -> float | None:
 def to_llm_response(msg: BetaMessage) -> LLMResponse:
     stop = msg.stop_reason if msg.stop_reason in _KNOWN_STOP_REASONS else "other"
     u = msg.usage
+    parts: list[Any] = list(u.iterations or []) or [u]
+    # With iterations (a compaction call, a fallback) the top-level counts cover only the
+    # reply; what was billed is the sum over every iteration (S6).
+    usage = Usage(
+        input_tokens=sum(p.input_tokens for p in parts),
+        output_tokens=sum(p.output_tokens for p in parts),
+        cache_read_input_tokens=sum(getattr(p, "cache_read_input_tokens", 0) or 0 for p in parts),
+        cache_creation_input_tokens=sum(
+            getattr(p, "cache_creation_input_tokens", 0) or 0 for p in parts
+        ),
+    )
     return LLMResponse(
         stop_reason=stop,  # type: ignore[arg-type]  # narrowed by the set check above
-        # exclude_unset keeps exactly the fields the API sent, so the echo is byte-faithful.
+        # to_dict keeps exactly the fields the API sent, so the echo is byte-faithful
+        # (a compaction block with null fields added is rejected).
         content=[b.to_dict(mode="json") for b in msg.content],
-        usage=Usage(
-            input_tokens=u.input_tokens,
-            output_tokens=u.output_tokens,
-            cache_read_input_tokens=u.cache_read_input_tokens or 0,
-            cache_creation_input_tokens=u.cache_creation_input_tokens or 0,
-        ),
+        usage=usage,
         model=msg.model,
     )
 
@@ -162,10 +195,51 @@ class AnthropicProvider:
         }
         if self._effort:
             req["output_config"] = {"effort": self._effort}
+        betas = []
         if self._fallback:
-            req["betas"] = [_FALLBACK_BETA]
+            betas.append(_FALLBACK_BETA)
             req["fallbacks"] = "default"
+        if carries_compaction(messages):
+            betas.append(COMPACTION_BETA)
+        if betas:
+            req["betas"] = betas
         return req
+
+    def build_compaction_request(
+        self, *, system: str, messages: list[Message], tools: list[ToolSpec], instructions: str
+    ) -> dict[str, Any]:
+        """The same model, system, tools and thinking settings as the conversation (the
+        summarizer reads them), with `compaction` instead of a reply. No fallbacks: a
+        declined summary just means no compaction this time."""
+        req = self.build_request(system=system, messages=messages, tools=tools)
+        req.pop("fallbacks", None)
+        req["betas"] = [COMPACTION_BETA]
+        req["compaction"] = {"type": "summarize", "instructions": instructions}
+        return req
+
+    async def compact(
+        self, *, system: str, messages: list[Message], tools: list[ToolSpec], instructions: str
+    ) -> LLMResponse:
+        """Ask the server to summarize `messages` (S6). On success the response holds one
+        `compaction` block and stop_reason "compaction"; otherwise its content is empty
+        and stop_reason says why (max_tokens, refusal, ...)."""
+        req = self.build_compaction_request(
+            system=system, messages=messages, tools=tools, instructions=instructions
+        )
+        try:
+            msg = await self._client.beta.messages.create(**req)
+        except anthropic.APIStatusError as e:
+            kind = status_kind(e.status_code, e.type)
+            raise LLMError(
+                f"API error {e.status_code}: {e.message}",
+                retryable=kind in RETRYABLE_KINDS,
+                kind=kind,
+                status=e.status_code,
+                retry_after_s=retry_after(e.response.headers),
+            ) from e
+        except anthropic.APIConnectionError as e:
+            raise LLMError(f"connection error: {e}", retryable=True, kind="connection") from e
+        return to_llm_response(msg)
 
     async def count_tokens(
         self, *, system: str, messages: list[Message], tools: list[ToolSpec]
@@ -178,6 +252,7 @@ class AnthropicProvider:
                 system=system,
                 messages=messages,  # type: ignore[arg-type]  # our Message is the wire shape
                 tools=tools,  # type: ignore[arg-type]
+                betas=[COMPACTION_BETA] if carries_compaction(messages) else [],
             )
         except anthropic.APIError as e:
             raise LLMError(f"token count failed: {e}", retryable=False) from e

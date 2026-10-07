@@ -40,6 +40,8 @@ from kama_claude.core.agent.prompts import system_prompt
 from kama_claude.core.agent.runner import make_provider, run_goal
 from kama_claude.core.bus.events import (
     EVENT_ADAPTER,
+    ContextCompactedEvent,
+    ContextCompactionFailedEvent,
     Event,
     LLMResponseEvent,
     LLMRetryEvent,
@@ -428,7 +430,8 @@ def read_events(path: Path) -> list[Event]:
 def _usage_sum(events: list[Event]) -> dict[str, int]:
     totals: Counter[str] = Counter()
     for e in events:
-        if isinstance(e, LLMResponseEvent):
+        # compaction calls are billed too (S6)
+        if isinstance(e, LLMResponseEvent | ContextCompactedEvent | ContextCompactionFailedEvent):
             totals.update(e.usage.model_dump())
     keys = (
         "input_tokens",
@@ -528,6 +531,8 @@ def context_metrics(events: list[Event], statuses: list[str]) -> dict[str, Any]:
         "cut_results": len(cuts),
         "chars_cut": sum(c.original_chars - c.kept_chars for c in cuts),
         "read_output_calls": sum(e.name == "read_output" for e in finished),
+        "compactions": sum(isinstance(e, ContextCompactedEvent) for e in events),
+        "compaction_failures": sum(isinstance(e, ContextCompactionFailedEvent) for e in events),
     }
 
 
@@ -1049,6 +1054,19 @@ def summarize(variant_dir: Path) -> str:
             f" · results cut {sum(c.get('cut_results', 0) for c in sized)}"
             f", read_output calls {sum(c.get('read_output_calls', 0) for c in sized)}"
         )
+        # Every trial is scored. Trials that compacted are reported beside the rest, not
+        # instead of them: dropping the ones that didn't would score the on arm on its
+        # hardest trials only, against every trial of the off arm.
+        compacted = [r for r in ok if (r.get("context") or {}).get("compactions")]
+        if compacted or any(c.get("compaction_failures") for c in sized):
+            n_comp = sum(r["context"]["compactions"] for r in compacted)
+            failed = sum(c.get("compaction_failures", 0) for c in sized)
+            n_pass = sum(int(r["grade"]["passed"]) for r in compacted)
+            lines.append(
+                f"- compaction: compacted in {len(compacted)}/{len(sized)} trials "
+                f"({n_comp} compactions, {failed} failed) · passed when compacted "
+                f"{n_pass}/{len(compacted)}"
+            )
     if mixed := _mixed_conditions(rows):
         lines.append(f"- MIXED CONDITIONS, not one variant: {_render_mixed(mixed)}")
     truncated = len(rows) - n

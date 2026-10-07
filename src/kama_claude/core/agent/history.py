@@ -20,6 +20,7 @@ import copy
 from typing import Any
 
 from kama_claude.core.bus.events import (
+    ContextCompactedEvent,
     Event,
     LLMResponseEvent,
     PlanNoticeEvent,
@@ -103,6 +104,41 @@ def start_run_messages(
     return messages, repaired
 
 
+RESUME_GOAL_MAX_CHARS = 20_000
+
+
+def resume_text(goal: str, plan: str | None, read_output: bool) -> str:
+    """The user turn after a compaction block (S6). The summary is the server's; the goal
+    and the plan are re-stated from the run's own records, verbatim, so the task can't
+    drift with the summary."""
+    if len(goal) > RESUME_GOAL_MAX_CHARS:
+        goal = goal[:RESUME_GOAL_MAX_CHARS] + "\n[... goal cut here; see the summary ...]"
+    parts = [
+        "<context-restored>",
+        "This conversation was compacted: the summary above replaces everything before "
+        "this point. The current request, verbatim:",
+        f"<goal>\n{goal}\n</goal>",
+    ]
+    if plan:
+        parts.append(f"Your plan, from the run's own records:\n{plan}")
+    hint = " Tool results that were cut are still readable with read_output." if read_output else ""
+    parts.append(
+        "Continue the task from where the summary leaves off. Files on disk are as you left "
+        "them: when exact contents matter, check the files rather than relying on the "
+        f"summary.{hint}\n</context-restored>"
+    )
+    return "\n".join(parts)
+
+
+def compacted_view(block: dict[str, Any], resume: str) -> list[Message]:
+    """What the conversation is after a compaction: the block first, as an assistant turn
+    of its own (exactly as returned), then the resume turn."""
+    return [
+        {"role": "assistant", "content": [block]},
+        {"role": "user", "content": resume},
+    ]
+
+
 def replay(history: list[Message], events: list[Event]) -> list[Message]:
     """The messages after one run, rebuilt from its events on top of `history`."""
     started = next(e for e in events if isinstance(e, RunStartedEvent))
@@ -132,6 +168,9 @@ def replay(history: list[Message], events: list[Event]) -> list[Message]:
             case PlanReminderEvent():
                 flush()
                 messages.append({"role": "user", "content": e.text})
+            case ContextCompactedEvent():
+                flush()
+                messages[:] = compacted_view(e.block, e.resume)
             case PlanNoticeEvent():
                 flush()
                 last = messages[-1]
@@ -145,12 +184,17 @@ def replay(history: list[Message], events: list[Event]) -> list[Message]:
     return messages
 
 
+def _is_compaction_turn(m: Message) -> bool:
+    c = m["content"]
+    return isinstance(c, list) and bool(c) and c[0].get("type") == "compaction"
+
+
 def conversation_problems(messages: list[Message]) -> list[str]:
     """Structural rules the Messages API enforces, checked locally: starts with a user
     turn, roles alternate, and every tool_use is answered by a tool_result (same ids,
     results first) in the very next user turn. Empty list = valid."""
     problems = []
-    if messages and messages[0]["role"] != "user":
+    if messages and messages[0]["role"] != "user" and not _is_compaction_turn(messages[0]):
         problems.append("first message is not from the user")
     for i, (a, b) in enumerate(zip(messages, messages[1:], strict=False)):
         if a["role"] == b["role"]:

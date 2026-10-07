@@ -13,6 +13,11 @@ FAKE_API_FAULTS (S5) makes the first requests fail, one fault per request, in or
 529 (overloaded), 500, 400 (permanent), 429@SECONDS (rate limited, with retry-after),
 stream (text starts streaming, then an overloaded error event mid-response).
 FAKE_API_MAX_PROMPT_CHARS (S6) answers 400 "prompt is too long" past that many chars.
+FAKE_API_TOKENS_PER_CHAR (S6) reports request sizes as 1000 + that x the messages' chars
+(and answers /v1/messages/count_tokens the same), so a small KAMA_CONTEXT_BUDGET is
+crossed. On-demand compaction is emulated: a request with `compaction` gets one block
+back (the beta header is required, as on the real API); a request that carries a block
+must have it first and send the header, or it gets the API's 400.
     FAKE_API_FAULTS=529,stream,429@0.2 python3 scripts/fake_api.py 7622
 
     python3 scripts/fake_api.py 7622 &
@@ -27,6 +32,35 @@ FAULTS = [f for f in os.environ.get("FAKE_API_FAULTS", "").split(",") if f]
 # S6: a request whose messages serialize to more than this many chars is "too long", as
 # the real API answers a prompt over the model's window (0 = no limit).
 MAX_PROMPT_CHARS = int(os.environ.get("FAKE_API_MAX_PROMPT_CHARS", "0"))
+TOKENS_PER_CHAR = float(os.environ.get("FAKE_API_TOKENS_PER_CHAR", "0"))
+COMPACT_BETA = "compact-2026-09-04"
+
+def tokens_of(body):
+    return 1000 + int(len(json.dumps(body["messages"])) * TOKENS_PER_CHAR)
+
+def turns_done(messages):
+    """Assistant turns so far. A compaction block (always first) stands for the turns it
+    summarized: its signature carries their count, so the script picks up after them."""
+    n = 0
+    for i, m in enumerate(messages):
+        c = m["content"]
+        if i == 0 and isinstance(c, list) and c and c[0].get("type") == "compaction":
+            n += int(c[0]["signature"].split(":")[1])
+        elif m["role"] == "assistant":
+            n += 1
+    return n
+
+def compaction_problem(body, beta):
+    for i, m in enumerate(body["messages"]):
+        c = m["content"]
+        blocks = [b for b in c if b.get("type") == "compaction"] if isinstance(c, list) else []
+        if blocks and (i != 0 or c[0].get("type") != "compaction"):
+            return "compaction_block_misplaced"
+        if blocks and COMPACT_BETA not in beta:
+            return "messages.0.content.0: 'compaction' is not one of the expected content block types"
+    if "compaction" in body and COMPACT_BETA not in beta:
+        return f"the compaction parameter requires anthropic-beta: {COMPACT_BETA}"
+    return None
 _lock = threading.Lock()
 
 def next_fault():
@@ -53,9 +87,28 @@ REPLIES = [
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    def send_json(self, code, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data))); self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
-        n = sum(m["role"] == "assistant" for m in body["messages"])
+        beta = self.headers.get("anthropic-beta", "")
+        if (problem := compaction_problem(body, beta)) is not None:
+            return self.send_json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": problem}})
+        if self.path.startswith("/v1/messages/count_tokens"):
+            return self.send_json(200, {"input_tokens": tokens_of(body) if TOKENS_PER_CHAR else 1500})
+        if "compaction" in body:
+            n = turns_done(body["messages"])
+            block = {"type": "compaction", "content": f"Summary of {n} assistant turns: python3 is installed (fake).", "signature": f"fake:{n}"}
+            return self.send_json(200, {
+                "id": "m", "type": "message", "role": "assistant", "model": body["model"], "content": [block],
+                "stop_reason": "compaction", "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0,
+                          "iterations": [{"type": "compaction", "input_tokens": tokens_of(body), "output_tokens": 60}]}})
+        n = turns_done(body["messages"])
         text, tools, stop = REPLIES[min(n, len(REPLIES) - 1)]
         fault = next_fault()
         size = len(json.dumps(body["messages"]))
@@ -81,7 +134,9 @@ class H(BaseHTTPRequestHandler):
         if fault == "stream":
             text = "this text is cut off and must be discarded"
         ev({"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "model": "claude-opus-5", "content": [], "stop_reason": None, "stop_sequence": None,
-            "usage": {"input_tokens": 12, "output_tokens": 1, "cache_read_input_tokens": 1400 * (n + 1), "cache_creation_input_tokens": 300}}})
+            "usage": {"input_tokens": 12, "output_tokens": 1,
+                      "cache_read_input_tokens": tokens_of(body) - 312 if TOKENS_PER_CHAR else 1400 * (n + 1),
+                      "cache_creation_input_tokens": 300}}})
         time.sleep(0.8 * DELAY)  # time to first token
         index = 0
         if text:

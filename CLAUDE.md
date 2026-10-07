@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 in progress (1/4 evals, 2/4 accounting and result caps done; next 3/4 compaction)**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 in progress (1/4 evals, 2/4 accounting and caps, 3/4 compaction done; next 4/4 observability and docs, then the A/B)**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -116,7 +116,7 @@ false = the S4 approvals: ask for bash/write_file, -y approves all), `KAMA_POLIC
 (credential-looking env vars to keep for bash), `KAMA_PRIVATE_PATHS` (more paths no tool may
 touch), `KAMA_LLM_MAX_RETRIES` (4), `KAMA_LLM_RETRY_BUDGET_S` (120), `KAMA_CONTEXT` (true; false = the
 S5 agent, for A/B runs), `KAMA_CONTEXT_BUDGET` (120000 tokens), `KAMA_TOOL_RESULT_MAX_CHARS`
-(30000) (S6; the budget takes effect with compaction, part 3).
+(30000) (S6: over the budget the history is compacted server-side, for models that support it).
 
 ### Layout
 
@@ -141,7 +141,8 @@ src/kama_claude/
     policy/engine.py     Policy: modes, rule files (user allows, workspace only tightens), Decision
     sandbox.py           bwrap / unshare / none, probed for real; bash argv; scrubbed env
     context.py           ContextMeter: request sizes exact from usage, the unsent tail estimated,
-                         an exact count_tokens near the budget (S6)
+                         an exact count_tokens near the budget; Compactor; the summary
+                         instructions (S6)
     outputs.py           OutputStore (results cut at the cap, saved whole in the run dir); cut()
     plan.py              Plan (a run's task DAG: add/update/render), PlanTask, statuses
     session.py           SessionStore: a session = its runs in order; history replayed from events
@@ -156,7 +157,8 @@ src/kama_claude/
     tools/note_tools.py  note_save, note_update, note_delete, note_list (no approval)
     tools/output_tools.py read_output: page through a cut result (no approval; S6)
     agent/loop.py        AgentLoop: model -> tools -> results -> repeat; emits run events
-    agent/history.py     replay() events -> messages; repair_orphans(); conversation_problems()
+    agent/history.py     replay() events -> messages (compaction resets them); repair_orphans();
+                         conversation_problems(); compacted_view(), resume_text()
     agent/sinks.py       EventSink protocol; events.jsonl writer; console printer
     agent/runner.py      build_loop(), prepare_run() (history + memory block), run_goal()
     agent/manager.py     RunManager (daemon): runs, fan-out with replay, approvals, cancel
@@ -194,6 +196,15 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   `CoreApp.__init__`, a client call, and unit + integration tests.
 - Agent history is append-only; assistant content blocks are echoed back verbatim
   (thinking signatures, fallback blocks). Never edit or re-serialize earlier turns.
+  The one exception is compaction (S6), and it is recorded: at a step boundary (never
+  mid tool round) the whole history becomes [compaction block, resume turn], logged as
+  a durable `context.compacted` event so replay rebuilds the same view. The block is
+  sent exactly as returned, with the beta header; nothing older is re-sent, so no
+  thinking block outlives its prefix. The resume turn restates the goal and the plan
+  from the run's own records, not from the summary.
+- Compaction waits for the context to grow past the first request after the last one
+  (a summary still over budget must not trigger a compaction every step), and after a
+  failed one waits a few steps. Its usage is billed into the run like any call.
 - Each `tool_use` gets exactly one `tool_result`, same order, all in one user message.
 - Every run writes `run.started` first and `run.finished` last, even on API errors,
   internal bugs and cancellation. `events.jsonl` alone must be enough to reconstruct a run.
