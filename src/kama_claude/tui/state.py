@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from kama_claude.core.bus.events import (
+    ContextCompactedEvent,
+    ContextCompactionFailedEvent,
     Event,
     LLMResponseEvent,
     LLMRetryEvent,
@@ -18,6 +20,7 @@ from kama_claude.core.bus.events import (
     ToolPolicyEvent,
     is_durable,
 )
+from kama_claude.core.context import request_tokens
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import Usage
 from kama_claude.core.plan import PlanTask
@@ -41,6 +44,10 @@ class RunView:
     mode: str | None = None  # the permission mode (S5); None = policy off
     blocked: int = 0
     retries: int = 0
+    # S6: the last request's size against the budget (None = context governance off)
+    context: int = 0
+    context_budget: int | None = None
+    compactions: int = 0
 
     @property
     def finished(self) -> bool:
@@ -59,17 +66,20 @@ class RunView:
                 self.goal, self.model, self.workspace = event.goal, event.model, event.workspace
                 self.planning, self.status = event.planning, "running"
                 self.mode = event.policy["mode"] if event.policy else None
+                self.context_budget = event.context["budget"] if event.context else None
             case ToolPolicyEvent(action="deny"):
                 self.blocked += 1
             case LLMRetryEvent():
                 self.retries += 1
             case LLMResponseEvent():
                 self.step = event.step
-                self.usage = self.usage + event.usage
-                cost = cost_usd(event.model or self.model, event.usage.model_dump())
-                self.cost_usd = (
-                    None if cost is None or self.cost_usd is None else self.cost_usd + cost
-                )
+                self.context = request_tokens(event.usage)
+                self._bill(event.model, event.usage)
+            case ContextCompactedEvent():
+                self.compactions += 1
+                self._bill(event.model, event.usage)
+            case ContextCompactionFailedEvent():
+                self._bill("", event.usage)
             case PlanUpdatedEvent():
                 self.plan = event.tasks
             case ToolApprovalRequestedEvent():
@@ -83,6 +93,12 @@ class RunView:
                 pass
         return True
 
+    def _bill(self, model: str, usage: Usage) -> None:
+        """Every call the run paid for, compaction summaries included."""
+        self.usage = self.usage + usage
+        cost = cost_usd(model or self.model, usage.model_dump())
+        self.cost_usd = None if cost is None or self.cost_usd is None else self.cost_usd + cost
+
     def headline(self, *, auto_approve: bool, connection: str) -> str:
         cost = f"${self.cost_usd:.4f}" if self.cost_usd is not None else "cost unknown"
         u = self.usage
@@ -94,6 +110,10 @@ class RunView:
             f" out {u.output_tokens:,}",
             cost,
         ]
+        if self.context:
+            of = f"/{self.context_budget / 1000:.0f}K" if self.context_budget else ""
+            comp = f" · {self.compactions} compaction(s)" if self.compactions else ""
+            parts.append(f"ctx {self.context / 1000:.1f}K{of}{comp}")
         if self.plan:
             done = sum(t.status == "completed" for t in self.plan)
             parts.append(f"plan {done}/{len(self.plan)}")

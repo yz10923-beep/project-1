@@ -331,3 +331,72 @@ async def test_nothing_is_compacted_before_the_first_response(tmp_path: Path) ->
     p = CompactingProvider([sized(text_response("ok"), BIG)])
     await _run(_settings(tmp_path), _ws(tmp_path), p, goal="x" * 60_000)
     assert p.compact_requests == []
+
+
+# ---------------------------------------------------------------- what a person sees (4/4)
+
+
+async def test_kama_trace_shows_the_curve_and_the_compaction(tmp_path: Path) -> None:
+    from kama_claude.core.trace.analyze import load_spans, render
+
+    p = CompactingProvider(three_steps())
+    _, run_dir, _ = await _run(_settings(tmp_path), _ws(tmp_path), p)
+    text = render(load_spans(run_dir / "trace.jsonl"))
+    assert "context  budget 10.0K · peak 30.0K (300% of budget)" in text
+    assert "1 compaction(s)" in text
+    assert "⇣ compacted" in text and "estimate vs actual" in text
+
+
+def test_the_tui_headline_shows_context_and_bills_compaction() -> None:
+    from datetime import UTC, datetime
+
+    from kama_claude.core.bus.events import LLMResponseEvent, RunStartedEvent
+    from kama_claude.tui.state import RunView
+
+    at = datetime.now(UTC)
+    v = RunView("r1")
+    v.apply(
+        RunStartedEvent(
+            run_id="r1",
+            seq=0,
+            at=at,
+            goal="g",
+            model="claude-opus-5",
+            workspace="/w",
+            max_steps=5,
+            context={"budget": 120_000, "cap": 30_000, "compaction": True},
+        )
+    )
+    v.apply(
+        LLMResponseEvent(
+            run_id="r1",
+            seq=1,
+            at=at,
+            step=1,
+            stop_reason="tool_use",
+            content=[],
+            usage=BIG,
+            latency_ms=5,
+            model="claude-opus-5",
+        )
+    )
+    before = v.cost_usd
+    v.apply(
+        ContextCompactedEvent(
+            run_id="r1",
+            seq=2,
+            at=at,
+            step=2,
+            block={"type": "compaction", "content": "s"},
+            resume="r",
+            tokens_before=31_000,
+            measured="count",
+            messages_replaced=3,
+            usage=Usage(input_tokens=31_000, output_tokens=300),
+            latency_ms=900,
+            model="claude-opus-5",
+        )
+    )
+    head = v.headline(auto_approve=True, connection="live")
+    assert "ctx 30.0K/120K · 1 compaction(s)" in head
+    assert v.cost_usd is not None and before is not None and v.cost_usd > before

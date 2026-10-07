@@ -42,6 +42,22 @@ class LlmCall:
 
 
 @dataclass
+class ContextPoint:
+    step: int
+    tokens: int  # the request's exact size
+    estimate: int | None  # what the meter predicted before sending it
+
+
+@dataclass
+class Compaction:
+    step: int
+    tokens_before: int
+    duration_ms: float
+    cost_usd: float | None
+    ok: bool
+
+
+@dataclass
 class TraceSummary:
     run_id: str
     status: str
@@ -79,12 +95,32 @@ class TraceSummary:
     asked: int = 0
     retries: int = 0
     backoff_ms: float = 0.0
+    # S6: how big each request was (exact) beside what the meter predicted, the budget,
+    # compactions (not model calls: summaries) and results cut at the cap
+    context_budget: int | None = None  # None = KAMA_CONTEXT=false
+    compaction_on: bool = False
+    context: list[ContextPoint] = field(default_factory=list)
+    compactions: list[Compaction] = field(default_factory=list)
+    compact_ms: float = 0.0
+    cut_results: int = 0
+    chars_cut: int = 0
 
     @property
     def other_ms(self) -> float:
         """Loop overhead: event writes, prompt building, scheduling."""
-        busy = self.llm_ms + self.tool_ms + self.approval_ms + self.backoff_ms
+        busy = self.llm_ms + self.tool_ms + self.approval_ms + self.backoff_ms + self.compact_ms
         return max(0.0, self.wall_ms - busy)
+
+    @property
+    def context_peak(self) -> int:
+        return max((p.tokens for p in self.context), default=0)
+
+    @property
+    def estimate_error(self) -> float | None:
+        """Median signed error of the meter's prediction, as a share of the actual size
+        (positive = it overestimated, which is the safe side)."""
+        errs = [(p.estimate - p.tokens) / p.tokens for p in self.context if p.estimate and p.tokens]
+        return statistics.median(errs) if errs else None
 
     @property
     def cache_hit_ratio(self) -> float | None:
@@ -119,6 +155,9 @@ def summarize(spans: list[Span]) -> TraceSummary:
     summary.blocked = int(run.attrs.get("policy_denials", 0))
     summary.repeat_blocked = int(run.attrs.get("repeat_denials", 0))
     summary.asked = int(run.attrs.get("approvals_asked", 0))
+    if "context_budget" in run.attrs:
+        summary.context_budget = int(run.attrs["context_budget"])
+        summary.compaction_on = bool(run.attrs.get("context_compaction"))
     if "plan_tasks" in run.attrs:
         summary.plan = {
             k.removeprefix("plan_"): int(v) for k, v in run.attrs.items() if k.startswith("plan_")
@@ -127,7 +166,33 @@ def summarize(spans: list[Span]) -> TraceSummary:
         if s.name == "llm.backoff":  # waiting before a retry, not model time
             summary.backoff_ms += s.duration_ms
             summary.retries += 1
+        elif s.name == "context.compact":  # a summary, billed like a call but not a step's
+            summary.compact_ms += s.duration_ms
+            for k in _TOKEN_KEYS:
+                summary.tokens[k] += int(s.attrs.get(k, 0))
+            cost = s.attrs.get("cost_usd")
+            summary.cost_usd = (
+                None if cost is None or summary.cost_usd is None else summary.cost_usd + cost
+            )
+            summary.compactions.append(
+                Compaction(
+                    step=int(s.attrs.get("step", 0)),
+                    tokens_before=int(s.attrs.get("tokens_before", 0)),
+                    duration_ms=s.duration_ms,
+                    cost_usd=cost,
+                    ok=s.status == "ok",
+                )
+            )
         elif s.kind == "llm":
+            if "context_tokens" in s.attrs:
+                est = s.attrs.get("context_estimate")
+                summary.context.append(
+                    ContextPoint(
+                        step=int(s.attrs.get("step", 0)),
+                        tokens=int(s.attrs["context_tokens"]),
+                        estimate=int(est) if est is not None else None,
+                    )
+                )
             summary.llm_ms += s.duration_ms
             for k in _TOKEN_KEYS:
                 summary.tokens[k] += int(s.attrs.get(k, 0))
@@ -156,6 +221,9 @@ def summarize(spans: list[Span]) -> TraceSummary:
             summary.approval_ms += s.duration_ms
         elif s.kind == "tool":  # the `tool <name>` span around approval + exec
             summary.tool_calls += 1
+            if "cut_chars" in s.attrs:
+                summary.cut_results += 1
+                summary.chars_cut += int(s.attrs["cut_chars"])
             summary.plan_tool_calls += s.attrs.get("tool") in PLAN_TOOL_NAMES
         elif s.kind == "bus":
             summary.subscriptions.append({"duration_ms": s.duration_ms, **s.attrs})
@@ -204,6 +272,47 @@ def _depths(spans: list[Span]) -> dict[str, int]:
     return depths
 
 
+def _k(n: float) -> str:
+    return f"{n / 1000:.1f}K"
+
+
+def _render_context(s: TraceSummary, width: int) -> list[str]:
+    """S6: the request size per step against the budget, with compactions in place."""
+    if not s.context:
+        return []
+    peak = s.context_peak
+    head = [f"budget {_k(s.context_budget)}" if s.context_budget else "governance off"]
+    share = f" ({peak / s.context_budget:.0%} of budget)" if s.context_budget else ""
+    head.append(f"peak {_k(peak)}{share}")
+    if s.compactions:
+        failed = sum(not c.ok for c in s.compactions)
+        head.append(
+            f"{len(s.compactions) - failed} compaction(s)"
+            + (f", {failed} failed" if failed else "")
+        )
+    elif s.context_budget and not s.compaction_on:
+        head.append("compaction off for this model")
+    if s.cut_results:
+        head.append(f"{s.cut_results} result(s) cut ({s.chars_cut:,} chars kept outside)")
+    if (err := s.estimate_error) is not None:
+        head.append(f"estimate vs actual {err:+.0%} (median)")
+    lines = ["", "context  " + " · ".join(head)]
+    top = max(peak, s.context_budget or 0) or 1
+    mark = round((s.context_budget or 0) / top * width) if s.context_budget else None
+    by_step = {c.step: c for c in s.compactions}
+    for p in s.context:
+        if (c := by_step.pop(p.step, None)) is not None:
+            cost = f", ${c.cost_usd:.4f}" if c.cost_usd is not None else ""
+            what = "compacted" if c.ok else "compaction FAILED at"
+            lines.append(f"  ⇣ {what} {_k(c.tokens_before)} ({_fmt_s(c.duration_ms)}{cost})")
+        n = round(p.tokens / top * width)
+        row = ["█" if i < n else " " for i in range(width)]
+        if mark is not None and mark < width:
+            row[mark] = "┃" if mark < n else "┊"
+        lines.append(f"  step {p.step:>3} |{''.join(row)}| {_k(p.tokens):>7}")
+    return lines
+
+
 def render(spans: list[Span], width: int = 40) -> str:
     """Human-readable report: breakdown, tokens, waterfall, slowest spans, bus and IPC."""
     s = summarize(spans)
@@ -220,6 +329,7 @@ def render(spans: list[Span], width: int = 40) -> str:
         ("tools", s.tool_ms),
         ("approval", s.approval_ms),
         *([("retry wait", s.backoff_ms)] if s.backoff_ms else []),
+        *([("compaction", s.compact_ms)] if s.compact_ms else []),
         ("other", s.other_ms),
     ):
         lines.append(f"  {label:<10}{_fmt_s(ms):>7} {ms / wall:>5.0%}  {_bar(ms / wall)}")
@@ -233,6 +343,7 @@ def render(spans: list[Span], width: int = 40) -> str:
         f"{t['cache_creation_input_tokens']:,} cache write · {t['output_tokens']:,} out "
         f"(cache hit {hit})",
     ]
+    lines += _render_context(s, width)
     if s.plan is not None:
         p = s.plan
         share = f" ({s.plan_tool_calls / s.tool_calls:.0%} of tool calls)" if s.tool_calls else ""

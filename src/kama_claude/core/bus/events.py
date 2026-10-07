@@ -55,6 +55,12 @@ class RunStartedEvent(_RunEvent):
     policy: dict[str, Any] | None = Field(
         default=None, description="mode, sandbox backend, rule counts, warnings; None = off."
     )
+    # S6: context governance as configured for this run.
+    context: dict[str, Any] | None = Field(
+        default=None,
+        description="budget (tokens), cap (chars per tool result), compaction (on for this "
+        "model); None = KAMA_CONTEXT=false.",
+    )
 
 
 class LLMResponseEvent(_RunEvent):

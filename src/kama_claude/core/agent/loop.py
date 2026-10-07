@@ -318,7 +318,11 @@ class AgentLoop:
                 repeat_denials=self._state.repeat_denials,
                 approvals_asked=self._state.approvals_asked,
                 llm_retries=self._state.llm_retries,
+                context_peak=self._state.meter.peak,
+                compactions=self._state.compactions,
             )
+            if (context := self._context_summary()) is not None:
+                span.set(**{f"context_{k}": v for k, v in context.items()})
             if self._planning:
                 counts = self._ctx.plan.counts()
                 span.set(
@@ -396,6 +400,7 @@ class AgentLoop:
                 repaired=repaired,
                 preamble=preamble,
                 policy=self._policy_summary(),
+                context=self._context_summary(),
             )
         )
 
@@ -626,7 +631,10 @@ class AgentLoop:
             )
             usage = resp.usage if resp is not None else Usage()
             state.usage = state.usage + usage
-            span.set(cost_usd=cost_usd(resp.model if resp else "", usage.model_dump()))
+            span.set(
+                cost_usd=cost_usd(resp.model if resp else "", usage.model_dump()),
+                **usage.model_dump(),
+            )
             if block is None:
                 failure = failure or f"no summary (stop_reason {resp.stop_reason if resp else '?'})"
                 span.fail(failure)
@@ -813,6 +821,15 @@ class AgentLoop:
         )
         result = dataclasses.replace(out.result, content=out.result.content + note)
         return dataclasses.replace(out, result=result)
+
+    def _context_summary(self) -> dict[str, Any] | None:
+        if self._base_ctx.outputs is None:
+            return None
+        return {
+            "budget": self._context_budget,
+            "cap": self._base_ctx.max_result_chars,
+            "compaction": self._compaction,
+        }
 
     def _policy_summary(self) -> dict[str, Any] | None:
         if self._policy is None:

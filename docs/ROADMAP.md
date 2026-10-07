@@ -809,12 +809,31 @@ S6 lands in four parts, committed as `S6 (n/4): ...` like S5's three.
      come first, sizes scale with `FAKE_API_TOKENS_PER_CHAR`, `count_tokens`). An
      integration test compacts a daemon run over the real SDK. `make live` has a real
      round trip (`test_real_compaction_round_trip`).
-4. **S6 (4/4): observability and docs**: the trace curve, TUI meter, CLI summary,
-   docs and interview points.
+4. **S6 (4/4): observability and docs** (done):
+   - **`kama trace`** has a context section: budget, peak (and its share of the
+     budget), compactions, results cut, and the meter's median estimate error. Below
+     it, a curve with one bar per model call; the budget is marked `┊`, or `┃` where a
+     bar crosses it, and each compaction sits where it happened, with its cost. The
+     summarizer is billed in the token totals and shown as its own row in "where the
+     time went", not as a model call of a step. A trace from before S6, or with context
+     off, still draws the curve ("governance off").
+   - **TUI headline:** `ctx 30.0K/120K · 1 compaction(s)`. Compaction usage is in the
+     run's cost; without it the cost would undercount exactly the summaries.
+   - **CLI:** a `context:` line at the start (budget, cap, compaction on or off for the
+     model) and the peak at the end. Both appear only with governance on, so the off
+     arm's console is the S5 one.
+   - **`run.started`** carries the context settings (`context`), and the run span
+     `context_*`, so every client and the trace know the budget.
 
 ### The S6 experiment (VM; costs money)
 
+First, a few cents: `make live` (includes `test_real_compaction_round_trip`). It proves the
+real API accepts our compaction request as built (system, tools, effort, caching), which
+the fake can't. If it fails, fix that before spending on the A/B.
+
 ```bash
+git checkout claude/eager-ptolemy-6ta3lk && git pull     # the run header prints the commit
+make live
 uv run python -m evals.run_evals run --approve-harness --reps 3 --variant s6-full
 KAMA_CONTEXT=false uv run python -m evals.run_evals run --reps 3 --variant s6-off
 uv run python -m evals.run_evals compare s6-off s6-full
@@ -834,6 +853,53 @@ Predictions, written before the run:
   important finding, and the summary instructions are the first suspect.
 
 ## Interview talking points
+
+### S6
+- **"How do you keep an agent's context under control?"** Three layers, each measured:
+  - one result can't flood it: capped at creation, the whole text kept outside, and
+    the model told how to page or narrow;
+  - growth is metered per request: exact from usage, the unsent tail estimated, an
+    exact count only near the budget;
+  - over budget, the history is summarized server-side at a step boundary, and the
+    goal and plan are restated from the agent's own records.
+
+  Every layer has a switch, so the A/B changes one thing.
+- **"Why not just truncate old tool results?"**
+  - Editing history breaks the prompt cache.
+  - On current models, preserved thinking makes an edited prefix a 400 error.
+  - So: cut a result when it's created (that isn't an edit), and compact the *whole*
+    history (no kept turns, so no thinking block outlives its prefix).
+
+  The event log stays append-only. The compaction is an event, so replay and the next
+  run of a session see exactly what was sent.
+- **"Server-side or your own summarizer?"** Server-side on-demand compaction: the
+  provider has trained for it, and the blocks are signed and work with preserved
+  thinking. I still own *when* (a budget I measure), *what to keep* (instructions:
+  exact numbers, ids, sign conventions), and *what never to trust it with*: the goal
+  and plan come from my records.
+- **"How do you know compaction didn't hurt quality?"** The same low-budget tasks with
+  compaction off, where the whole history still fits. The checks are built to lose
+  specific facts: run 1's number after its input file is replaced, a sign convention
+  learned early and needed late. Every trial is scored, with "passed when compacted"
+  reported beside the total, because excluding trials that didn't compact would bias
+  the on arm.
+- **Bugs the tests found before any paid run:**
+  - a compaction loop (a summary still over budget re-compacted every step and paid
+    each time);
+  - a guard that never fired (`steps == 0`, but steps are counted before the step
+    runs);
+  - the TUI and trace undercounting cost by exactly the summaries.
+
+  And one in my own plan: I said tool output was uncapped, but it had been capped
+  since S1. The growth that matters is accumulation, not single results.
+- **"How good is your token estimate?"** It's measured, not assumed: every model call
+  records the estimate next to the exact size, and `kama trace` prints the median
+  error. The estimate is biased high on purpose (chars/3), since a late compaction
+  costs more than an early one.
+- **Finance angle:** an incident-triage agent reads logs far bigger than any context
+  window. Here a 200K-line gateway log is the test bed. The skills are narrowing the
+  query, paging what was cut, and keeping exact identifiers (timestamps, counts)
+  through a summary. Those are what the ELK triage agent needs.
 
 ### S5
 - "How do you keep an agent from doing damage?" Two layers. A policy reads the command:

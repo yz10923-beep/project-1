@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 in progress (1/4 evals, 2/4 accounting and caps, 3/4 compaction done; next 4/4 observability and docs, then the A/B)**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built (1/4 evals, 2/4 accounting and caps, 3/4 compaction, 4/4 observability); next: `make live`, then the S6 A/B on the VM**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -90,7 +90,7 @@ uv run kama session list|show ID · kama notes list|add|edit|rm   # sessions; th
 uv run kama run --mode default|accept-edits|auto|read-only "..."   # permission mode; -y = auto
 uv run kama policy show [-w DIR] · kama policy check "rm -rf build"   # what the policy decides, why
 uv run kama run --local "..."         # in-process, no daemon (S1 behaviour)
-uv run kama trace [RUN_ID]            # where a run's time/tokens/cost went (default: latest)
+uv run kama trace [RUN_ID]            # where a run's time/tokens/cost/context went (default: latest)
 uv run kama trace RUN_ID --chrome t.json   # open in https://ui.perfetto.dev
 python3 scripts/fake_api.py 7622 &    # offline end-to-end: ANTHROPIC_BASE_URL=http://127.0.0.1:7622
 make live                             # real-API tests (needs ANTHROPIC_API_KEY; costs money)
@@ -149,7 +149,8 @@ src/kama_claude/
     notes.py             NoteStore (workspace/session scope), NoteBook, memory_preamble()
     trace/span.py        Span: trace_id, span_id, parent_id, kind (agent|llm|tool|bus|ipc)
     trace/tracer.py      Tracer: span() context manager (ContextVar parents), record()
-    trace/analyze.py     summarize() (pure), render() text report, to_chrome() export
+    trace/analyze.py     summarize() (pure), render() text report (+ the S6 context curve),
+                         to_chrome() export
     tools/base.py        Tool[Params] ABC, ToolResult, workspace path confinement
     tools/registry.py    validate input -> run -> every failure becomes an is_error result
     tools/builtin.py     read_file, list_dir, write_file, bash

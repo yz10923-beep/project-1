@@ -269,6 +269,8 @@ def test_a_session_past_its_budget_is_compacted_over_the_real_sdk(tmp_path: Path
         out = run_cli("run", "-y", "-w", str(ws), "check python", env=d.env)
     assert out.returncode == 0, out.stderr + out.stdout
     assert "⇣ context compacted:" in out.stdout and "plan: 2/2 completed" in out.stdout
+    assert "context: budget 10,000 tokens" in out.stdout
+    assert "of 10,000 budget · 1 compaction(s)" in out.stdout
     run_dir = Path(out.stdout.rsplit("events: ", 1)[1].strip()).parent
     events = [json.loads(x) for x in (run_dir / "events.jsonl").read_text().splitlines()]
     [compacted] = [e for e in events if e["type"] == "context.compacted"]

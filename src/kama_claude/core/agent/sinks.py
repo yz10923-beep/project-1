@@ -70,6 +70,7 @@ class ConsolePrinter:
         self._streamed_steps: set[int] = set()
         self._mid_line = False
         self._plan: dict[int, PlanTask] = {}
+        self._budget: int | None = None  # S6: from run.started, None = context off
 
     async def emit(self, event: Event) -> None:
         if not isinstance(event, LLMDeltaEvent) and self._mid_line:
@@ -105,6 +106,14 @@ class ConsolePrinter:
                     )
                     for w in event.policy.get("warnings", []):
                         self._p(f"  ! {w}")
+                if event.context:
+                    c = event.context
+                    self._budget = int(c["budget"])
+                    self._p(
+                        f"  context: budget {c['budget']:,} tokens · results cut at "
+                        f"{c['cap']:,} chars · compaction "
+                        + ("on" if c["compaction"] else "off (model)")
+                    )
             case NoteUpdatedEvent():
                 why = f" ({event.reason})" if event.reason else ""
                 vol = " [volatile]" if event.note.volatile else ""
@@ -187,6 +196,12 @@ class ConsolePrinter:
                 )
                 if self._plan:
                     self._p(_plan_summary(list(self._plan.values())))
+                if self._budget is not None and event.context_peak:
+                    comp = f" · {event.compactions} compaction(s)" if event.compactions else ""
+                    self._p(
+                        f"context: peak {event.context_peak:,} tokens of {self._budget:,} "
+                        f"budget{comp}"
+                    )
                 safety = [
                     f"{event.policy_denials} blocked" if event.policy_denials else "",
                     f"{event.repeat_denials} repeated" if event.repeat_denials else "",

@@ -123,6 +123,16 @@ classifier whether the policy was on or not). `KAMA_POLICY=false KAMA_SANDBOX=of
 the A/B baseline. The policy also has its own free eval: `python -m evals.policy_eval`
 runs 143 labelled commands; zero dangerous allows is the gate in `make verify`.
 
+**Context (S6).** Rows have a `context` object: peak and mean request size (exact, from
+usage), results cut at the cap, chars cut, `read_output` calls, compactions and failed
+ones, and `overflow`. Compaction calls are billed into the row's usage. The summary prints
+a context line and, when any trial compacted, "compacted in k/n trials · passed when
+compacted x/k". Every trial is scored; trials that didn't compact are never dropped,
+because dropping them would score the on arm on its hardest trials only. A context
+overflow (the agent's history outgrew the window) is graded as a failure, not an infra
+error. Low-budget tasks set `context_budget` in task.toml. `KAMA_CONTEXT=false` is the
+A/B baseline (the S5 agent, byte for byte).
+
 **Sub-checks.** A grader that checks several things names each one in its reason
 (`answer ok, run2_no_reread WRONG`). The summary counts every named check over all reps,
 and `compare A B` lays two variants side by side per task and per check, with median

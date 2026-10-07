@@ -259,3 +259,106 @@ async def test_run_goal_writes_trace_next_to_events(tmp_path: Path) -> None:
 class _NullEvents:
     async def emit(self, event: Any) -> None:
         pass
+
+
+# ---- S6: the context section
+
+
+CONTEXT_RUN = [
+    mk(
+        "run",
+        "agent",
+        0,
+        10_000,
+        None,
+        status="completed",
+        steps=3,
+        model="claude-opus-5",
+        context_budget=10_000,
+        context_cap=30_000,
+        context_compaction=True,
+    ),
+    mk(
+        "llm.call",
+        "llm",
+        0,
+        1_000,
+        "run",
+        step=1,
+        context_tokens=4_000,
+        context_estimate=4_400,
+        input_tokens=10,
+        cache_read_input_tokens=3_990,
+        output_tokens=50,
+        cost_usd=0.01,
+    ),
+    mk("tool bash", "tool", 1_000, 500, "run", tool="bash", cut_chars=70_000, output_id="t1"),
+    mk(
+        "llm call 2",
+        "llm",
+        2_000,
+        1_000,
+        "run",
+        step=2,
+        context_tokens=11_000,
+        context_estimate=12_100,
+        input_tokens=10,
+        cache_read_input_tokens=10_990,
+        output_tokens=50,
+        cost_usd=0.02,
+    ),
+    mk(
+        "context.compact",
+        "llm",
+        3_000,
+        2_000,
+        "run",
+        step=3,
+        tokens_before=11_200,
+        measured="count",
+        input_tokens=11_200,
+        output_tokens=300,
+        cost_usd=0.05,
+    ),
+    mk(
+        "llm call 3",
+        "llm",
+        5_000,
+        1_000,
+        "run",
+        step=3,
+        context_tokens=2_000,
+        context_estimate=2_200,
+        input_tokens=2_000,
+        output_tokens=40,
+        cost_usd=0.01,
+    ),
+]
+
+
+def test_context_section_draws_the_curve_with_compactions_in_place() -> None:
+    s = summarize(CONTEXT_RUN)
+    assert s.context_budget == 10_000 and s.context_peak == 11_000
+    assert [p.tokens for p in s.context] == [4_000, 11_000, 2_000]
+    assert len(s.calls) == 3  # the compaction is not a model call of a step
+    assert s.tokens["input_tokens"] == 10 + 10 + 11_200 + 2_000  # but it is billed
+    assert s.cost_usd == pytest.approx(0.09) and s.compact_ms == 2_000
+    assert s.estimate_error == pytest.approx(0.10)  # it overestimated by 10%, the safe side
+    text = render(CONTEXT_RUN, width=20)
+    assert "context  budget 10.0K · peak 11.0K (110% of budget) · 1 compaction(s)" in text
+    assert "1 result(s) cut (70,000 chars kept outside) · estimate vs actual +10% (median)" in text
+    lines = text.splitlines()
+    i = lines.index(next(x for x in lines if "⇣ compacted 11.2K" in x))
+    assert "$0.0500" in lines[i] and lines[i + 1].startswith("  step   3 |")
+    step2 = next(x for x in lines if x.startswith("  step   2 |"))
+    assert "┃" in step2 and step2.endswith("11.0K")  # over budget: the bar crosses the mark
+    assert "compaction" in next(x for x in lines if x.strip().startswith("compaction"))
+
+
+def test_with_context_off_the_curve_is_drawn_without_a_budget() -> None:
+    off = [
+        CONTEXT_RUN[0].model_copy(update={"attrs": {"status": "completed", "steps": 1}}),
+        CONTEXT_RUN[1],
+    ]
+    text = render(off, width=20)
+    assert "context  governance off · peak 4.0K" in text and "┊" not in text
