@@ -20,6 +20,7 @@ from kama_claude.core.tools.base import (
 )
 
 _MAX_LIST_ENTRIES = 500
+_PAGE_FOOTER_ROOM = 200  # chars kept free under the cap for read_file's footer (S6)
 
 
 class _Params(BaseModel):
@@ -59,7 +60,25 @@ class ReadFile(Tool[ReadFileParams]):
             return ToolResult(f"(file has {len(lines)} lines; nothing at offset {params.offset})")
         if ctx.max_line_chars is not None:  # S6: a minified line can't fill the context
             chunk = [clip_line(line, ctx.max_line_chars) for line in chunk]
-        body = "\n".join(f"{i:>6}\t{line}" for i, line in enumerate(chunk, start=params.offset))
+        numbered = [f"{i:>6}\t{line}" for i, line in enumerate(chunk, start=params.offset)]
+        if ctx.outputs is not None:
+            # S6: a page stops at the result cap on a whole line and says where to go on.
+            # Without this, 2000 lines of ordinary code (~120K chars) would reach the
+            # registry's cap and lose their middle, under a footer claiming all 2000 shown.
+            room, used, n = ctx.max_result_chars - _PAGE_FOOTER_ROOM, 0, 0
+            for text in numbered:
+                if n and used + len(text) + 1 > room:
+                    break
+                used, n = used + len(text) + 1, n + 1
+            if n < len(numbered):
+                end = start + n
+                return ToolResult(
+                    "\n".join(numbered[:n])
+                    + f"\n(showing lines {params.offset}-{end} of {len(lines)}: the page stopped "
+                    f"at the {ctx.max_result_chars:,}-character limit; continue with "
+                    f"offset={end + 1})"
+                )
+        body = "\n".join(numbered)
         end = start + len(chunk)
         if end < len(lines):
             body += f"\n(showing lines {params.offset}-{end} of {len(lines)})"

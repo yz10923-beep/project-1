@@ -280,7 +280,9 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   would be an edit). With KAMA_CONTEXT on, the whole text is first saved in the run dir
   (outside the workspace) and is readable only through read_output, for this run and
   earlier runs of its session. The tool.finished event stores exactly what the model
-  saw, plus `cut`. KAMA_CONTEXT=false = the S1 middle cut and no read_output (the S5 agent).
+  saw, plus `cut`. read_file pages instead of being cut: its page stops at the cap on a
+  whole line and names the next offset. KAMA_CONTEXT=false = the S1 middle cut and no
+  read_output (the S5 agent).
 - A request's size is exact from its usage (input + cache read + cache write); only the
   part appended since is estimated. llm.call spans record both, so the estimator's error
   is measured; run.finished records the peak.

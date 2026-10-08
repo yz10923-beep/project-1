@@ -125,6 +125,43 @@ async def test_read_file_cuts_long_lines_only_with_context_on(tmp_path: Path) ->
     assert "a" * 9000 in off.content
 
 
+CODE = "".join(f"def f{i}(x):  # a typical line of code, about sixty chars\n" for i in range(3000))
+
+
+async def test_read_file_pages_to_the_cap_on_whole_lines_with_context_on(tmp_path: Path) -> None:
+    """2000 lines of ordinary code are ~130K chars: with context on, a page stops at the
+    cap on a whole line and says where to continue, instead of losing its middle."""
+    (tmp_path / "m.py").write_text(CODE)
+    reg = ToolRegistry(builtin_tools())
+    store = OutputStore(tmp_path / "out")
+    ctx = ToolContext(workspace=tmp_path, outputs=store, max_line_chars=2000)
+    first = await reg.execute("read_file", {"path": "m.py"}, ctx, output_id="t1")
+    assert first.cut is None and len(first.content) <= 30_000
+    body, footer = first.content.rsplit("\n", 1)
+    nums = [int(line.split("\t")[0]) for line in body.splitlines()]
+    assert nums == list(range(1, len(nums) + 1))  # contiguous: nothing missing
+    end = nums[-1]
+    assert footer == (
+        f"(showing lines 1-{end} of 3000: the page stopped at the 30,000-character limit; "
+        f"continue with offset={end + 1})"
+    )
+    nxt = await reg.execute("read_file", {"path": "m.py", "offset": end + 1}, ctx, output_id="t2")
+    assert nxt.content.startswith(f"{end + 1:>6}\tdef f{end}(x):")
+    small = await reg.execute("read_file", {"path": "m.py", "limit": 10}, ctx, output_id="t3")
+    assert small.content.endswith("(showing lines 1-10 of 3000)")  # under the cap: as before
+    assert not (tmp_path / "out").exists()  # nothing had to be saved
+
+
+async def test_read_file_with_context_off_is_the_s5_result(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(CODE)
+    r = await ToolRegistry(builtin_tools()).execute(
+        "read_file", {"path": "m.py"}, ToolContext(workspace=tmp_path)
+    )
+    lines = CODE.splitlines()[:2000]
+    s5 = "\n".join(f"{i:>6}\t{line}" for i, line in enumerate(lines, 1))
+    assert r.content == truncate_middle(s5 + "\n(showing lines 1-2000 of 3000)")
+
+
 def test_the_policy_allows_read_output_in_every_mode(tmp_path: Path) -> None:
     for mode in ("default", "auto", "read-only"):
         p = Policy.load(tmp_path, mode=mode, user_file=tmp_path / "none.toml")  # type: ignore[arg-type]

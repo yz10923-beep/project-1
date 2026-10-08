@@ -776,6 +776,17 @@ S6 lands in four parts, committed as `S6 (n/4): ...` like S5's three.
    - **Rows:** `context.cut_results`, `chars_cut` and `read_output_calls`.
    - **Context off** changes nothing the model sees: the same tools, the S1 middle cut,
      no outputs dir. Tested byte for byte against `truncate_middle`.
+   - **`read_file` pages instead of being cut** (a follow-up, found while answering
+     "should the cap be raised?"). Its default page is 2000 lines, and 2000 lines of
+     ordinary code are about 130K chars. So since S1, reading a large file lost the
+     middle of the page to the registry's cut, under a footer saying "showing lines
+     1-2000". A model could believe it had read code it never saw. Head and tail are
+     the right shape for command output (errors land at the end), but the wrong shape
+     for a file. With context on, a page now stops at the cap on a whole line and says
+     `continue with offset=N`; the tool's description is unchanged, so the off arm's
+     request is the S5 one. The answer to the question itself: keep 30K, and let the
+     A/B's `cut_results` and `read_output_calls` per task decide whether a cap sweep is
+     worth running.
 3. **S6 (3/4): compaction** (done):
    - **When.** At the start of a step (after plan notices are delivered, so they're
      summarized too), if the run has had a response and the meter puts the next
