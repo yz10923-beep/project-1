@@ -596,12 +596,12 @@ class AgentLoop:
         if len(messages) <= 1 or step < state.compact_after or messages[-1]["role"] != "user":
             return
         tokens, how = await state.meter.measure(system, tools, messages)
-        # A summary that was itself over the budget sets a floor: compacting again before
-        # the context grows past it would only buy the same summary. Under the budget it
-        # is no floor at all (that rule let runs exceed the budget by up to 25%).
-        budget = self._context_budget
-        floor = state.compact_floor
-        if tokens <= (budget if floor <= budget else floor + budget // 4):
+        # Hysteresis: after a compaction, the next one waits until the context has grown
+        # a quarter of the budget past the summary. A summary that leaves less room than
+        # that means the budget is too small for the task's working set: the run goes
+        # over the budget rather than paying for a summary every step. (s6-cal dropped
+        # this rule for summaries under the budget, and compacted nearly every step.)
+        if tokens <= max(self._context_budget, state.compact_floor + self._context_budget // 4):
             return
         assert isinstance(self._provider, Compactor)
         t0 = time.monotonic()

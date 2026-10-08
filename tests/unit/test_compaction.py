@@ -325,20 +325,20 @@ async def test_a_summary_still_over_budget_does_not_compact_every_step(tmp_path:
     assert len(p.compact_requests) == 1
 
 
-async def test_a_summary_under_the_budget_sets_no_floor(tmp_path: Path) -> None:
-    """Found in the S6 curves: the floor rule above also held back compaction when the
-    summary was *under* the budget, so long-refactor ran up to 25% over it. Now an
-    under-budget summary is no floor: over the budget means compact."""
-    near = Usage(input_tokens=20, cache_read_input_tokens=9_000, output_tokens=1_200)
+async def test_a_summary_near_the_budget_does_not_compact_every_step(tmp_path: Path) -> None:
+    """Found the expensive way (s6-cal): with no floor for summaries under the budget, a
+    summary at 95% of it put the next request over, so nearly every step compacted (each
+    one ~40s and an uncached summary). A quarter of the budget of growth comes first."""
+    near = Usage(input_tokens=20, cache_read_input_tokens=9_500, output_tokens=600)
     p = CompactingProvider(
         [
             sized(tool_response(("t1", "read_file", {"path": "a.txt"})), BIG),
-            sized(tool_response(("t2", "list_dir", {})), near),  # 9,020 after the summary
-            sized(text_response("1 line."), SMALL),  # 9,020 + 1,200 + tail > 10K
+            *[sized(tool_response((f"t{i}", "list_dir", {})), near) for i in range(2, 6)],
+            sized(text_response("1 line."), near),
         ]
     )
     _, _, events = await _run(_settings(tmp_path), _ws(tmp_path), p)
-    assert [e.step for e in events if isinstance(e, ContextCompactedEvent)] == [2, 3]
+    assert [e.step for e in events if isinstance(e, ContextCompactedEvent)] == [2]
 
 
 async def test_a_continuing_session_over_budget_compacts_at_its_first_step(

@@ -931,11 +931,13 @@ What the run found:
 
   Confirmed from the traces (`scripts/context_curves.py`, 133 calls of the long-*
   tasks, `s6-full/context-curves.txt`). Three causes, the first one not the expected one:
-  - **The floor rule** caused most long-refactor overshoots. After a compaction, the
-    next one waited until the context passed `floor + budget/4`, where the floor is
-    the first request after the summary. That rule exists for summaries still *over*
-    the budget, but it also applied to summaries under it: at 12K, a 10.9K summary
-    request let the context reach 13.6K before compacting.
+  - **The floor rule** explains most long-refactor overshoots. After a compaction, the
+    next one waits until the context passes `floor + budget/4`, where the floor is the
+    first request after the summary. At 12K, a 10.9K summary request let the context
+    reach 13.6K before compacting. I first read this as a bug and removed the floor for
+    summaries under the budget; s6-cal then compacted almost every step (see below).
+    It is hysteresis, and the overshoot is its price when the summary leaves under a
+    quarter of the budget free. The real problem is the next point.
   - **The guard "no measured request yet"** blocked compaction at step 1 of every
     continuing session run. All long-session-recall overshoots (12.1-13.3K) were the
     first request of runs 2-5, which carry the earlier runs' history.
@@ -944,8 +946,10 @@ What the run found:
     the step-1 ratio was 1.21 in every trial. Appended tails were within about 3%.
     Median error -2%, range -21% to +1%, 105 of 133 calls under. Near the budget the
     exact count decides, so this mattered mostly where the first two prevented a count.
-  - Also: post-compaction requests sit at 7.5-11K against 12K, so long-refactor
-    compacted every 2-4 steps. The budget is tighter than the task's working set.
+  - **The budget is smaller than the task's working set.** Post-compaction requests
+    sit at 7.5-12.5K against 12K (system prompt and tools alone are ~4.3K), so
+    long-refactor compacted every 2-4 steps, and no rule can keep it under 12K
+    without compacting every step.
 
 Status: S6 is built and measured. The done-criterion is met for "measured quality
 loss" (with the caveats above) and approximately for "under budget" (at most 25% over,
@@ -959,16 +963,20 @@ S6 follow-ups:
      s4-full to s6-full are `tier = "regression"`. They run once at a stage's end at
      1 rep (about $1.80), not in every A/B. They cost $5.48 per arm per run and told S6
      nothing new. See EVALS.md section 8.
-2. (done) The overshoot is confirmed and fixed (see "Peaks went over the budget"):
-   - the floor applies only when the summary request was itself over the budget;
+2. The overshoot is diagnosed (see "Peaks went over the budget"). Kept:
    - compaction may run at step 1 when there is history before the goal (only a lone
      goal has nothing to summarize);
    - the meter calibrates itself: each request estimated from scratch sets the
      actual/chars-3 ratio (clamped to 1-2) that later estimates are scaled by, starting
      at 1.25 until one is measured.
 
-   Each has a test that fails on the old code. Re-run the long-* tasks to confirm peaks
-   stay at or under the budget.
+   Reverted: dropping the floor for summaries under the budget. The s6-cal run with
+   it was stopped: long-refactor summaries sit at 8.5-11K of 12K, each step adds
+   0.6-1.5K, so nearly every step paid for a compaction (~40s each), and the cost ran
+   several times s6-full's ~$1.7 per trial. A test now pins it (5 steps with summaries
+   at 95% of the budget compact once, not 5 times). Next: give long-refactor a budget
+   its working set fits (about 20K; the off arm peaks at 27-32K, so it still compacts)
+   and re-run.
 3. Optional: a cost lever. Compaction at effort `low` vs `high` on the long-* tasks
    (output is the biggest item, and the summarizer thinks at the conversation's
    effort). No kept turns, so the kept-thinking constraint doesn't apply.
@@ -1028,10 +1036,12 @@ S6 follow-ups:
   records the estimate next to the exact size, and `kama trace` prints the median
   error. I assumed chars/3 ran high; the traces said 11-21% *low* on whole requests
   (tool-schema JSON is dense), so the meter now calibrates a ratio on every request
-  it estimates from scratch. The bigger lesson was elsewhere: the overshoot I blamed
-  on the estimator was mostly two decision rules (a floor that applied under the
-  budget, and a guard that skipped step 1 of continuing sessions). Measuring each
-  decision, not just the totals, is what found them.
+  it estimates from scratch. The overshoot I blamed on the estimator was mostly two
+  decision rules. One was a real bug (a guard that skipped step 1 of continuing
+  sessions). The other was hysteresis doing its job, and when I "fixed" it the
+  compactor thrashed: a summary at 90% of the budget triggered a compaction nearly
+  every step. Classic control-loop lesson: a threshold with no hysteresis oscillates.
+  The overshoot was the symptom of a budget smaller than the task's working set.
 - **Finance angle:** an incident-triage agent reads logs far bigger than any context
   window. Here a 200K-line gateway log is the test bed. The skills are narrowing the
   query, paging what was cut, and keeping exact identifiers (timestamps, counts)
