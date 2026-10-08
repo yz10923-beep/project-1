@@ -935,9 +935,9 @@ What the run found:
     next one waits until the context passes `floor + budget/4`, where the floor is the
     first request after the summary. At 12K, a 10.9K summary request let the context
     reach 13.6K before compacting. I first read this as a bug and removed the floor for
-    summaries under the budget; s6-cal then compacted almost every step (see below).
-    It is hysteresis, and the overshoot is its price when the summary leaves under a
-    quarter of the budget free. The real problem is the next point.
+    summaries under the budget, then restored it (follow-up 2). It is hysteresis, and
+    the overshoot is its price when the summary leaves under a quarter of the budget
+    free. The real problem is the next point.
   - **The guard "no measured request yet"** blocked compaction at step 1 of every
     continuing session run. All long-session-recall overshoots (12.1-13.3K) were the
     first request of runs 2-5, which carry the earlier runs' history.
@@ -951,9 +951,56 @@ What the run found:
     long-refactor compacted every 2-4 steps, and no rule can keep it under 12K
     without compacting every step.
 
-Status: S6 is built and measured. The done-criterion is met for "measured quality
-loss" (with the caveats above) and approximately for "under budget" (at most 25% over,
-at a toy budget).
+Status (s6-full): the done-criterion was met for "measured quality loss" (with the
+caveats above) and approximately for "under budget" (at most 25% over, at a toy budget).
+
+### S6 results after the follow-ups (s6-cal2 vs s6-cal2-off)
+
+Same code for both arms (841c025, harness a9ff55c4), 3 reps. long-refactor at a 20K
+budget (was 12K), long-session-recall at 12K. Follow-ups in effect: the spec fix, the
+meter calibration, compaction at step 1 of a continuing session, the floor rule kept.
+
+| | s6-full (on) | **s6-cal2 (on)** | s6-cal2-off |
+|---|---|---|---|
+| long-refactor passed | 2/3 | **3/3** | 3/3 |
+| long-refactor peak / budget | 12.1-15.0K / 12K | **18.9-19.9K / 20K** | 28.7-31.6K |
+| long-refactor compactions | 6, 6, 6 | **2, 2, 4** | 0 |
+| long-refactor cost per trial | $1.58-1.85 | **$0.81, $0.85, $1.76** | $0.60-0.67 |
+| long-refactor wall per trial | 394-497s | **194, 214, 515s** | 136-170s |
+| long-session-recall passed | 3/3 | **3/3** | (s6-off: 3/3) |
+| long-session-recall peak / budget | 12.1-13.3K / 12K | **11.5-11.6K / 12K** | (15-19K) |
+| long-session-recall cost per trial | $0.49-0.83 | $0.63-0.94 | ($0.31-0.41) |
+| requests over budget (curves) | 12 of 133 | **0 of 125** | n/a |
+| estimate error: median, range | -2%, -21..+1% | **+0%, -10..+15%** | |
+
+- **Under budget: met.** Every request of every on-arm trial is at or under its
+  budget, at both 12K and 20K. Quality: 6/6 with compaction, 3/3 without. At n=3 per
+  arm that rules out nothing small; it doesn't show a loss either.
+- **The calibration worked, and errs high where it is still unsure.** A first request
+  is now +4% (was -17%); the first request of a continuing session is +10-15% (its
+  history is less dense than tool schemas, so the 1.25 prior overshoots), which is the
+  safe side: it only makes the exact count happen sooner.
+- **Step-1 compaction (F3) fixed long-session-recall** (its overshoots were all first
+  requests of runs 2-5) and costs about $0.10-0.15 per trial: one more summary.
+- **Compaction costs time as well as money.** A compaction took 25-58s (median ~38s)
+  and wrote 1.8-4.6K output tokens. On long-refactor it was 37-41% of the wall time.
+  A row's `latency_s` counts model calls only; `scripts/context_curves.py` shows it.
+- **Compaction still costs more than it saves here**: long-refactor 1.8x the off arm
+  at 20K (was 2.8x at 12K). The off arm's whole history (≤32K) is cheap to keep cached.
+  Compaction is for the window, not a default saving (as in s6-full).
+- **rep 1 is the variance**: 32 steps, 4 compactions, $1.76, 515s. Without the budget
+  credit for plan-only steps it would have hit max_steps.
+
+**s6-cal, the run in between (F2: no floor for summaries under the budget).** Its
+long-refactor rep 0 compacted 6 times with a peak of 11.9K (under 12K), $1.51, 405s:
+no worse than s6-full. Rep 1 hit the 900s trial timeout. The timeout row carried no
+usage, so the bill (about $10 across the crashed first attempt, s6-cal, and
+s6-cal-off) could not be reconciled from the results; timeout rows now record their
+spend. I reverted F2 calling it thrashing. A unit test shows it can thrash (summaries
+at 95% of the budget compact every step), and s6-full's summaries reached 12.5K of 12K.
+But rep 0 didn't thrash, and rep 1's trace (on the VM) is what would show whether it
+did or something else stalled. The revert stands on the hysteresis argument, not on
+this data.
 
 S6 follow-ups:
 1. (done) long-refactor's goal now says the legacy names go too ("no shims, aliases or
@@ -970,13 +1017,14 @@ S6 follow-ups:
      actual/chars-3 ratio (clamped to 1-2) that later estimates are scaled by, starting
      at 1.25 until one is measured.
 
-   Reverted: dropping the floor for summaries under the budget. The s6-cal run with
-   it was stopped: long-refactor summaries sit at 8.5-11K of 12K, each step adds
-   0.6-1.5K, so nearly every step paid for a compaction (~40s each), and the cost ran
-   several times s6-full's ~$1.7 per trial. A test now pins it (5 steps with summaries
-   at 95% of the budget compact once, not 5 times). long-refactor's budget is now 20K,
-   which its working set fits (the off arm peaks at 27-32K, so it still compacts);
-   long-session-recall stays at 12K (off peaks 15-19K). Re-run both arms as s6-cal2.
+   Reverted: dropping the floor for summaries under the budget (see "s6-cal" above
+   for what the data does and doesn't show). A test pins the hysteresis (5 steps with
+   summaries at 95% of the budget compact once, not 5 times). long-refactor's budget
+   is now 20K, which its working set fits. (done: s6-cal2 above; 0 requests over
+   budget, 6/6 passed.)
+   - Open: s6-cal long-refactor rep 1's trace, to tell a thrash from a stall. If it is
+     a stall (a non-streaming compaction call hanging), compaction needs its own
+     timeout.
 3. Optional: a cost lever. Compaction at effort `low` vs `high` on the long-* tasks
    (output is the biggest item, and the summarizer thinks at the conversation's
    effort). No kept turns, so the kept-thinking constraint doesn't apply.
@@ -1037,11 +1085,13 @@ S6 follow-ups:
   error. I assumed chars/3 ran high; the traces said 11-21% *low* on whole requests
   (tool-schema JSON is dense), so the meter now calibrates a ratio on every request
   it estimates from scratch. The overshoot I blamed on the estimator was mostly two
-  decision rules. One was a real bug (a guard that skipped step 1 of continuing
-  sessions). The other was hysteresis doing its job, and when I "fixed" it the
-  compactor thrashed: a summary at 90% of the budget triggered a compaction nearly
-  every step. Classic control-loop lesson: a threshold with no hysteresis oscillates.
-  The overshoot was the symptom of a budget smaller than the task's working set.
+  decision rules and a budget. One rule was a real bug (a guard that skipped step 1
+  of continuing sessions). The other was hysteresis doing its job: removing it can
+  make a compactor oscillate when the summary sits near the budget, which a unit test
+  shows. And the budget was smaller than the task's working set, so no rule could
+  keep it under. After the fixes and a 20K budget: 0 of 125 requests over budget.
+  I also over-claimed once: I blamed a costly run on the removed rule before reading
+  its rows, and the rows didn't back it. Read the data before the diagnosis.
 - **Finance angle:** an incident-triage agent reads logs far bigger than any context
   window. Here a 200K-line gateway log is the test bed. The skills are narrowing the
   query, paging what was cut, and keeping exact identifiers (timestamps, counts)

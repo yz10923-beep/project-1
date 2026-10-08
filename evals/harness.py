@@ -762,8 +762,24 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                     _run_all(task, ws, settings, provider), timeout=cfg.timeout_s
                 )
             except TimeoutError:
-                # A hard ceiling, recorded as a timeout, never as a zero score.
-                _append(vdir / "errors.jsonl", {**err_base, "class": "timeout"})
+                # A hard ceiling, recorded as a timeout, never as a zero score. What it
+                # spent is in its (cancelled) runs' logs: without it the summary's "cost on
+                # failed attempts" read $0 for a trial that ran 900s (s6-cal rep1).
+                partial = [
+                    e for log in sorted(events_dir.glob("*/events.jsonl")) for e in read_events(log)
+                ]
+                _append(
+                    vdir / "errors.jsonl",
+                    {
+                        **err_base,
+                        "class": "timeout",
+                        "timeout_s": cfg.timeout_s,
+                        "model": settings.model,
+                        "usage": _usage_sum(partial),
+                        "model_calls": sum(isinstance(e, LLMResponseEvent) for e in partial),
+                        "compactions": sum(isinstance(e, ContextCompactedEvent) for e in partial),
+                    },
+                )
                 return None
             wall_s = time.monotonic() - t0
             events = [e for r in ran for e in r.events]
