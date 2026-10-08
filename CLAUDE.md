@@ -310,6 +310,8 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
 
 ### Conventions
 
+- Git: all work is committed and pushed to `claude/eager-ptolemy-6ta3lk` only, in every
+  stage. Never create or push another branch, even when a session's setup names one.
 - Python 3.12, `mypy --strict`, ruff (line length 100). `make verify` must pass before commit.
 - Comments/docstrings in English, short, and only where the *why* isn't obvious.
 - Tests use real sockets on port 0 and real subprocesses rather than mocking the transport.
