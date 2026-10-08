@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups done and measured (s6-cal2: 0 of 125 requests over budget, 6/6 vs 3/3 passed; long-refactor at 20K costs 1.8x off); S6 leftovers: stage-end regression sweep (run before S7 code lands), s6-cal rep1 timeout trace (open), compaction-effort A/B (deferred past S7) → S7 planned (`docs/ROADMAP.md` "S7 plan": MCP client, tool manifest, subagents, skills in 5 parts; next: S7 (1/5) evals first)**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups done and measured (s6-cal2: 0 of 125 requests over budget, 6/6 vs 3/3 passed; long-refactor at 20K costs 1.8x off); S6 closed: regression sweep 13/13 ($1.60); open, not blocking: s6-cal rep1 timeout trace, compaction-effort A/B (deferred past S7) → S7 planned (`docs/ROADMAP.md` "S7 plan": MCP client, tool manifest, subagents, skills in 5 parts; next: S7 (1/5) evals first)**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands

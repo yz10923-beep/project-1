@@ -1044,11 +1044,15 @@ what it costs in context, cache and money.
 
 ### Before S7 code lands (S6 leftovers)
 
-1. **S6 stage-end regression sweep** (`--tier regression --reps 1 --variant
-   s6-regress`, about $1.80). Run it now, before S7 touches the registry and the tool
-   list. Otherwise an S7 regression and an S6 one can't be told apart.
-2. **s6-cal long-refactor rep 1's trace** (on the VM). Still open. It decides whether
-   compaction needs its own timeout. It doesn't block S7.
+1. (done) **S6 stage-end regression sweep** (`s6-regress`, code 841c025, harness
+   a9ff55c4): 13/13 regression tasks passed at 1 rep, $1.60, median 6 steps and 25s.
+   Context on at the 120K default changed nothing measurable on them: peak request
+   median 7.0K (max 14.1K), no results cut, no compaction. This is the baseline S7's
+   regressions are measured against.
+2. **s6-cal long-refactor rep 1's trace** (on the VM). Still open: the pushed
+   `s6-cal/s6-context-curves.txt` was empty (the script found no matching trace and
+   printed its message to stderr), so it was removed. It decides whether compaction
+   needs its own timeout. It doesn't block S7.
 3. **Compaction effort A/B**: deferred until after S7. It's an optional cost lever, and
    S7 is the last stage still unbuilt.
 
