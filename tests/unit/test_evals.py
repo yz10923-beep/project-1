@@ -22,7 +22,7 @@ from evals.harness import (
 )
 
 from kama_claude.core.config import Settings
-from kama_claude.core.llm.types import LLMError, LLMResponse
+from kama_claude.core.llm.types import LLMError, LLMResponse, Usage
 from tests.fakes import ScriptedProvider, text_response, tool_response
 
 FIXED_CALC = "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n"
@@ -147,6 +147,25 @@ async def test_serving_errors_are_retried_and_kept_out_of_scores(tmp_path: Path)
     [err] = rows(cfg, "errors.jsonl")
     assert row["attempts"] == 2 and row["grade"]["passed"] == 1.0
     assert err["class"] == "serving_error" and err["attempt"] == 1
+
+
+async def test_a_timeout_records_what_the_trial_spent(tmp_path: Path) -> None:
+    """Found in s6-cal: a trial that ran to the 900s ceiling left a timeout row with no
+    usage, so the summary put its spend at $0 and the bill made no sense."""
+    paid = Usage(input_tokens=100, output_tokens=50)
+
+    class SlowSecondCall(ScriptedProvider):
+        async def complete(self, **kw: Any) -> LLMResponse:
+            if self.requests:
+                await asyncio.sleep(3600)
+            return await super().complete(**kw)
+
+    first = tool_response(("l", "list_dir", {})).model_copy(update={"usage": paid})
+    cfg = cfg_for(tmp_path, lambda s: SlowSecondCall([first]), timeout_s=0.5)
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    [err] = rows(cfg, "errors.jsonl")
+    assert (err["class"], err["model_calls"], err["model"]) == ("timeout", 1, "fake-model")
+    assert (err["usage"]["input_tokens"], err["usage"]["output_tokens"]) == (100, 50)
 
 
 async def test_timeout_is_an_error_not_a_zero(tmp_path: Path) -> None:

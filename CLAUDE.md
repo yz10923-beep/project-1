@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups: spec fix, tiers, meter calibration, step-1 compaction (the floor-rule change thrashed in s6-cal and was reverted); long-refactor budget 20K; next: re-run the long-* tasks (s6-cal2), then S7**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups done and measured (s6-cal2: 0 of 125 requests over budget, 6/6 vs 3/3 passed; long-refactor at 20K costs 1.8x off); open: s6-cal rep1 timeout trace, optional compaction-effort A/B, stage-end regression sweep; then S7**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -209,7 +209,7 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   history besides the goal (a continuing session can compact at step 1). After a
   compaction the next one waits until the context grows a quarter of the budget past
   the summary (hysteresis: a summary near the budget would otherwise compact every
-  step; s6-cal did); after a failed one it waits a few steps. Its usage is billed into
+  step); after a failed one it waits a few steps. Its usage is billed into
   the run like any call.
 - Each `tool_use` gets exactly one `tool_result`, same order, all in one user message.
 - Every run writes `run.started` first and `run.finished` last, even on API errors,
