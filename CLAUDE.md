@@ -97,7 +97,8 @@ make live                             # real-API tests (needs ANTHROPIC_API_KEY;
 
 uv run python -m evals.run_evals list      # eval tasks (docs/EVALS.md explains everything)
 make evals-selftest                        # graders vs oracle / null / wrong solutions; free
-uv run python -m evals.run_evals run --reps 3 [--variant v1] [--tasks a,b]   # paid
+uv run python -m evals.run_evals run --reps 3 [--variant v1] [--tasks a,b] [--tier core]   # paid
+uv run python -m evals.run_evals run --tier regression --reps 1 --variant sN-regress   # stage end
 uv run python -m evals.run_evals summary [--variant v1]
 uv run python -m evals.run_evals compare v1 v2   # A/B per task and sub-check
 uv run python -m evals.policy_eval [-v]       # the policy's labelled command corpus; free
@@ -180,7 +181,8 @@ evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ 
                          (log-error-triage is the reference task; `_delete.txt` in a solution deletes;
                          risk-report-spec grades 10 requirements separately, wrong/ from make_answers.py;
                          multi-run tasks: [[runs]] + setup.py between() + _runs.json in solutions;
-                         S6 tasks set `context_budget`; long-refactor's fixture is make_fixture.py's)
+                         S6 tasks set `context_budget`; long-refactor's fixture is make_fixture.py's;
+                         `tier = "regression"` = saturated, run at a stage's end at 1 rep)
 evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/ git-ignored)
 ```
 
@@ -295,8 +297,9 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   `errors.jsonl` and never count as a score. A context overflow is not infra: the
   agent's history outgrew the window, so it is graded (`context_overflow`). A variant
   is one condition (harness, model, effort, memory, policy, context, sandbox); a trial
-  that differs stops the suite. Only the user approves the harness hash
-  (`--approve-harness`); never pass it on their behalf.
+  that differs stops the suite. Paid runs are tiered: per change, only the core tasks the
+  change can affect; the regression tier at a stage's end at 1 rep. Only the user
+  approves the harness hash (`--approve-harness`); never pass it on their behalf.
 
 ### Conventions
 

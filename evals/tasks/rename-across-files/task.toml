@@ -9,4 +9,5 @@ code, tests and docs. Don't leave an alias behind. Other teams import `inv_conv_
 Behavior must stay the same.
 """
 tags = ["refactor", "multi-file", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 20

@@ -243,6 +243,18 @@ When a capability task has passed every time for a while, it becomes a regressio
 When every task passes, the eval is saturated and can't show improvement, so add harder
 ones.
 
+In this repo that's the `tier` field in task.toml, used through `run --tier`:
+
+| tier | tasks | when it runs |
+|---|---|---|
+| `core` | the current stage's tasks, plus any with real variance (recall-across-runs) | each change's A/B, only the tasks the change can affect, 3 reps |
+| `regression` | the 13 that passed 3/3 in every run from s4-full to s6-full | once at a stage's end, or after a change to the shared path (system prompt, tool specs, loop, provider request): 1 rep, the default arm only; a failure gets re-run at 3 reps |
+
+Below both, `make verify` runs on every commit for free (selftest, the policy corpus, the
+fake-API end-to-end tests); in S6 it caught every bug before any paid run. An arm whose
+code path a change doesn't touch isn't re-run: compare against its stored variant. The
+regression tier cost $5.48 per arm at 3 reps and told S6 nothing new.
+
 ## 9. How this carries over to the incident-triage agent
 
 The same harness shape, with different graders:

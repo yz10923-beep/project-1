@@ -4,6 +4,7 @@
 # the one in its history or notes. An agent with no memory passes this trivially; the
 # point is that adding memory must not break it. Finance's version of a stale cache.
 tags = ["memory", "staleness", "guard", "finance", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 15
 
 [[runs]]

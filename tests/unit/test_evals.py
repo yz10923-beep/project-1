@@ -636,3 +636,19 @@ async def test_the_answer_key_is_out_of_the_agents_reach(tmp_path: Path) -> None
         for b in m["content"]
     ]
     assert all("def check" not in r for r in results)  # nothing of the checker came back
+
+
+def test_tiers_split_the_suite_into_measures_and_breakage_guards() -> None:
+    """Saturated tasks (3/3 in every run for stages) are the regression tier: a stage-end
+    sweep at 1 rep. Core tasks are what current work is measured on."""
+    every = load_tasks()
+    core, regression = load_tasks(tier="core"), load_tasks(tier="regression")
+    assert {t.id for t in core} | {t.id for t in regression} == {t.id for t in every}
+    assert not {t.id for t in core} & {t.id for t in regression}
+    assert {"long-refactor", "long-session-recall", "recall-across-runs"} <= {t.id for t in core}
+    assert "fix-add-bug" in {t.id for t in regression}
+    assert [t.id for t in load_tasks(["fix-add-bug", "long-refactor"], tier="core")] == [
+        "long-refactor"
+    ]
+    with pytest.raises(SystemExit, match="unknown tier"):
+        load_tasks(tier="nightly")

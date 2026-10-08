@@ -11,4 +11,5 @@ Write the answer to answer.json as {"service": "...", "count": N, "first_error":
 where first_error is the msg text without the surrounding quotes. Do not modify the log.
 """
 tags = ["analysis", "logs", "finance", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 20

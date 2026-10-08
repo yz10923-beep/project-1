@@ -6,4 +6,5 @@ goal = """
 Implement everything in SPEC.md. The work is done when every requirement in it is met.
 """
 tags = ["planning", "long", "finance", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 40

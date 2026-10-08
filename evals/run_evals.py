@@ -56,6 +56,12 @@ def main() -> None:
     sub.add_parser("selftest")
     run = sub.add_parser("run")
     run.add_argument("--tasks", help="comma-separated task ids (default: all)")
+    run.add_argument(
+        "--tier",
+        choices=("core", "regression", "all"),
+        default="all",
+        help="core: per-change A/Bs; regression: saturated tasks, a stage-end sweep at 1 rep",
+    )
     run.add_argument("--reps", type=int, default=3)
     run.add_argument("--variant", default="baseline", help="baseline, v1, v2, ...")
     run.add_argument("--model", help="override KAMA_MODEL")
@@ -71,7 +77,7 @@ def main() -> None:
 
     if args.cmd == "list":
         for t in load_tasks():
-            print(f"### {t.id}  [{', '.join(t.tags)}]\n{t.goal}\n")
+            print(f"### {t.id}  ({t.tier})  [{', '.join(t.tags)}]\n{t.goal}\n")
         return
     if args.cmd == "selftest":
         tasks = load_tasks()
@@ -87,7 +93,7 @@ def main() -> None:
         print(compare(RESULTS_DIR / args.a, RESULTS_DIR / args.b))
         return
 
-    tasks = load_tasks(args.tasks.split(",") if args.tasks else None)
+    tasks = load_tasks(args.tasks.split(",") if args.tasks else None, tier=args.tier)
     if problems := selftest(tasks):
         raise SystemExit("selftest failed; fix graders first:\n" + "\n".join(problems))
     _check_approval(args.approve_harness)

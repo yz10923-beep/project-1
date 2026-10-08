@@ -937,9 +937,13 @@ loss" (with the caveats above) and approximately for "under budget" (at most 25%
 at a toy budget).
 
 S6 follow-ups:
-1. long-refactor's goal says what to do with the legacy names (proposed: "remove
-   them, no shims or re-exports"), plus `wrong/kept-shims`. Then re-run long-refactor
-   in both arms (about $7).
+1. (done) long-refactor's goal now says the legacy names go too ("no shims, aliases or
+   re-exports"), and `wrong/kept-shims` (rep 1's solution) fails on `no_legacy_refs`
+   as it should. Re-run long-refactor in both arms with item 2.
+   - Eval cost policy (decided here): the 13 tasks that passed 3/3 in every run from
+     s4-full to s6-full are `tier = "regression"`. They run once at a stage's end at
+     1 rep (about $1.80), not in every A/B. They cost $5.48 per arm per run and told S6
+     nothing new. See EVALS.md section 8.
 2. Confirm the overshoot from the traces, then calibrate the meter: use the first
    request's exact prefix size and a per-run chars-per-token ratio, or count exactly
    from 70%.

@@ -10,4 +10,5 @@ then symbol. A file with only the header prints only the header. Standard librar
 A sample file, trades.csv, is in the directory.
 """
 tags = ["feature", "finance", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 20

@@ -2,5 +2,6 @@
 # to ask, not to build something. Without cases like this, "always act" scores 100%.
 goal = "create a python cli that ..."
 tags = ["clarify", "negative"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 8
 oracle_reply = "What should the CLI do? Tell me its purpose and I'll build it."

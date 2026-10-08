@@ -139,6 +139,21 @@ def main() -> None:
     write("wrong/stopped-halfway", migrated(half))
     tests = (FIX / "tests/test_riskkit.py").read_text().replace("< 25", "< 400")
     write("wrong/edited-tests", {**migrated(ORACLE), "tests/test_riskkit.py": tests})
+    # the names kept as deprecated shims in __init__ (s6-full rep 1): results unchanged,
+    # but the goal says to remove them entirely
+    shims = (
+        '"""riskkit: small risk analytics for the desk."""\n\n'
+        "from riskkit.measures import ExpectedShortfall, VaR\n\n"
+        '__all__ = ["ExpectedShortfall", "VaR", "legacy_es", "legacy_var"]\n'
+        '__version__ = "1.9.0"\n\n\n'
+        "def legacy_var(returns: list[float], conf: float = 0.95) -> float:\n"
+        '    """Deprecated: use -VaR(conf).of(returns)."""\n'
+        "    return -VaR(conf).of(returns)\n\n\n"
+        "def legacy_es(returns: list[float], conf: float = 0.95) -> float:\n"
+        '    """Deprecated: use -ExpectedShortfall(conf).of(returns)."""\n'
+        "    return -ExpectedShortfall(conf).of(returns)\n"
+    )
+    write("wrong/kept-shims", {**migrated(ORACLE), "riskkit/__init__.py": shims})
     write(
         "wrong/overflowed",
         {**migrated(ORACLE), "_runs.json": json.dumps([{"status": "context_overflow"}])},

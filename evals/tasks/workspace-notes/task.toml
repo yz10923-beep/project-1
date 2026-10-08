@@ -4,6 +4,7 @@
 # obvious setting (fixtures/risk.db) makes two tests fail; the right one
 # (fixtures/risk_v2.db) is buried in CONTRIBUTING.md.
 tags = ["memory", "notes", "cross-session", "finance", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 20
 
 [[runs]]

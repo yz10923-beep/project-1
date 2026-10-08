@@ -1,4 +1,5 @@
 # Real-world shape: a user reports failing tests, nothing more (symptom, not diagnosis).
 goal = "The tests in this project are failing. Please fix the problem."
 tags = ["bugfix", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 15

@@ -98,6 +98,10 @@ class Task:
     runs: tuple[RunSpec, ...] = ()
     # S6: a task can set a low token budget so compaction happens at eval size
     context_budget: int | None = None
+    # core: what current work is measured on, every A/B. regression: saturated tasks
+    # (passing every rep for stages) that only guard against breakage, run at a stage's
+    # end at 1 rep; a task that always passes measures nothing.
+    tier: str = "core"
 
     @property
     def fixture(self) -> Path:
@@ -162,7 +166,13 @@ class CheckResult:
     reason: str
 
 
-def load_tasks(ids: Iterable[str] | None = None) -> list[Task]:
+TIERS = ("core", "regression")
+
+
+def load_tasks(ids: Iterable[str] | None = None, tier: str = "all") -> list[Task]:
+    """Tasks by id (default: all), then by tier ("core", "regression" or "all")."""
+    if tier != "all" and tier not in TIERS:
+        raise SystemExit(f"unknown tier {tier!r}: use one of {(*TIERS, 'all')}")
     wanted = set(ids) if ids else None
     tasks = []
     for toml_path in sorted(TASKS_DIR.glob("*/task.toml")):
@@ -184,10 +194,17 @@ def load_tasks(ids: Iterable[str] | None = None) -> list[Task]:
                 oracle_reply=cfg.get("oracle_reply", "Done."),
                 runs=runs,
                 context_budget=cfg.get("context_budget"),
+                tier=cfg.get("tier", "core"),
             )
         )
+        if tasks[-1].tier not in TIERS:
+            raise SystemExit(f"{toml_path}: tier must be one of {TIERS}")
     if wanted is not None and (missing := wanted - {t.id for t in tasks}):
         raise SystemExit(f"unknown task(s): {sorted(missing)}")
+    if tier != "all":
+        tasks = [t for t in tasks if t.tier == tier]
+        if not tasks:
+            raise SystemExit(f"no {tier} task matches")
     return tasks
 
 

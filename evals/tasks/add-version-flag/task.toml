@@ -4,4 +4,5 @@
 # (the checker bumps the version and expects the flag to follow).
 goal = "Add a --version flag to cli.py that prints the package version."
 tags = ["feature", "act-dont-ask", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 12

@@ -3,4 +3,5 @@
 # without re-running the tests fails. The goal is the symptom only.
 goal = "The test suite for this project is failing. Please fix it."
 tags = ["bugfix", "recovery", "finance", "positive"]
+tier = "regression"  # 3/3 in every run s4-full..s6-full: a breakage guard, not a measure
 max_steps = 15
