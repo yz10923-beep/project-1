@@ -863,6 +863,90 @@ Predictions, written before the run:
   budget. A loss of more than 1 trial in 6 across the two tasks is the stage's most
   important finding, and the summary instructions are the first suspect.
 
+### S6 results (Opus 5, effort high, 3 reps; harness be73a8c6, commit 150ac97, bwrap)
+
+`s6-full` 50/51, `s6-off` 50/51. Cost **$12.96 vs $9.06 (+43%)**.
+
+Both arms ran the same commit under one condition each; only `context` differs.
+Credit ran out mid-run: 2 `request_error`s per arm, not scored, and the resumed run
+filled the trials.
+
+| prediction | result |
+|---|---|
+| 14 old tasks: no compaction, within noise | ✓ no compaction; 42/42 on vs 41/42 off (recall-across-runs again); their cost −$0.21 combined |
+| big-log-triage: both arms ≥2/3 | ✓ 3/3 and 3/3 |
+| big-log-triage: off peak >120K in ≥1 trial; `read_output` used | ✗ peaks 8-10K in both arms, 0 results cut, `read_output` never called |
+| long-*: on ≥2/3, ≥1 compaction per trial | ✓ 6/6 trials compacted (24 compactions, 0 failed), 5/6 passed |
+| long-*: off the same or better, peak several times the budget | ✓ 6/6; off peaks 15-32K against a 12K budget |
+| more than 1 loss in 6 = the stage's main finding | no: exactly 1 in 6, and it isn't a lost fact (below) |
+
+What the run found:
+- **Compaction cost money; it didn't save it.** All of the +$3.9 is in the two
+  low-budget tasks: long-refactor $1.82 → $5.03 (2.8×, 18 compactions) and
+  long-session-recall $1.11 → $1.96 (+78%, 6 compactions). The other 15 tasks are
+  within noise. Per long-refactor trial:
+
+  | | off | on |
+  |---|---|---|
+  | output (summaries, extra steps) | $0.25 | $0.93 |
+  | cache writes (each compaction resets the cache) | $0.18 | $0.62 |
+  | cache reads (what the smaller context saves) | $0.18 | $0.12 |
+
+  With prompt caching a long context is cheap to keep (reads cost 0.1× input). A
+  compaction pays for a summary (output, with thinking at effort high), re-writes the
+  new prefix into the cache, and costs extra steps re-reading files the summary only
+  described.
+
+  Break-even: going from S to s tokens saves (S − s) × $0.50/M per remaining step,
+  against roughly $0.1-0.2 per compaction.
+  - At 12K → 5K that saves $0.0035 per step and never pays back.
+  - At 120K → 10K it saves $0.055 per step and pays back in about 3-4 steps.
+
+  The test budget (12K) is the worst case by design. Compaction's value is staying
+  inside the window and keeping attention on what matters; it only saves money when
+  the context is large relative to the summary.
+- **At the default budget, compaction never fired in this suite.** The largest
+  request in any trial of any task, in either arm, was 32.5K tokens against 120K.
+  Opus never dumped output: on big-log-triage it narrowed every query (`grep -c`,
+  `awk`). So the realistic-accumulation task didn't accumulate. It stays as a triage
+  regression task, but it isn't a context stress test.
+- **The one loss is a spec ambiguity, not a forgotten fact.** long-refactor rep 1
+  failed `no_legacy_refs`. It kept `legacy_var`/`legacy_es` in `__init__` as
+  deprecated shims, on purpose, so "every result the package returns stays the
+  same". It said so in its answer, and it verified 99 function outputs bit for bit.
+  The goal never says "remove the names from the public API", so two experts could
+  disagree. Quality loss attributable to compaction: 0 of 6. But 5/6 has a 95%
+  interval of 44-97%, so this run can't rule out a real loss either.
+- **long-session-recall doesn't isolate compaction.** Notes were saved in every trial
+  of both arms (2-7 each, available in all 4 later runs), so the morning fact may have
+  come back through a note rather than the summary. The task measures the whole
+  system, which is fair, but not compaction alone. Isolating it would need notes off
+  with history on, and there is no such switch.
+- **Peaks went over the budget.** All 6 compacted trials peaked at 12.1-15.0K against
+  12K (up to 25% over). The likely cause:
+  - the estimator runs low on dense text (the fixed prefix of tool-schema JSON
+    measured about 24% under chars/3), and on numeric CSV;
+  - the exact count only starts at 85% of the budget, which at 12K leaves a 1.8K
+    margin, while at 120K it leaves 18K.
+
+  To confirm, from the traces (on the VM, git-ignored), per step: estimate vs actual,
+  and how each compaction was decided.
+
+Status: S6 is built and measured. The done-criterion is met for "measured quality
+loss" (with the caveats above) and approximately for "under budget" (at most 25% over,
+at a toy budget).
+
+S6 follow-ups:
+1. long-refactor's goal says what to do with the legacy names (proposed: "remove
+   them, no shims or re-exports"), plus `wrong/kept-shims`. Then re-run long-refactor
+   in both arms (about $7).
+2. Confirm the overshoot from the traces, then calibrate the meter: use the first
+   request's exact prefix size and a per-run chars-per-token ratio, or count exactly
+   from 70%.
+3. Optional: a cost lever. Compaction at effort `low` vs `high` on the long-* tasks
+   (output is the biggest item, and the summarizer thinks at the conversation's
+   effort). No kept turns, so the kept-thinking constraint doesn't apply.
+
 ## Interview talking points
 
 ### S6
@@ -894,6 +978,17 @@ Predictions, written before the run:
   learned early and needed late. Every trial is scored, with "passed when compacted"
   reported beside the total, because excluding trials that didn't compact would bias
   the on arm.
+  - Result: 5/6 with compaction vs 6/6 without. The one failure was a spec ambiguity
+    in my task (deprecated shims kept), not a forgotten fact.
+  - And I say what n=6 can't show: the interval is 44-97%.
+- **"Did compaction save money?"** No: +43% overall, 2.8× on the hardest task. Prompt
+  caching makes a long context cheap to keep (reads cost 0.1× input). Each compaction
+  pays for a summary in output tokens, re-writes the cache, and costs re-reads.
+  - It only pays back when the context is large relative to the summary: at 120K →
+    10K, after about 3-4 steps; at 12K, never.
+  - So compaction is for the window and for attention, not a default cost saver.
+
+  I'd tune it by measuring compaction effort (low vs high), not by guessing.
 - **Bugs the tests found before any paid run:**
   - a compaction loop (a summary still over budget re-compacted every step and paid
     each time);
