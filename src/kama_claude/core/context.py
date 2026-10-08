@@ -3,12 +3,18 @@
 The size of the request just sent is exact: the response's usage says it (input tokens
 are only the uncached tail, so add cache reads and cache writes). The size of the *next*
 request is that, plus the reply, plus whatever was appended since (tool results,
-notices), which hasn't been measured: that part is estimated at 3 chars per token, on
-the high side for English and code. Near the budget the estimate isn't good enough to
-decide on (part 3 compacts on it), so the meter asks the API for an exact count.
+notices), which hasn't been measured: that part is estimated at 3 chars per token. Near
+the budget the estimate isn't good enough to decide on (compaction does), so the meter
+asks the API for an exact count.
 
 Every llm.call span records the estimate and the actual size, so the estimator's error
-is measured, not assumed.
+is measured, not assumed. It was: chars/3 runs *low* on a whole request (tool schemas,
+JSON and digits are denser than prose, and the API adds its own tool prompt), by 11-21%
+in the S6 runs, while the appended tails were within a few percent. So the meter
+calibrates itself: every request estimated from scratch (the first, and the first after
+a compaction) sets the ratio actual/raw that later estimates are scaled by. Until one is
+measured it starts at FRESH_PRIOR, a little above what was observed, so an uncalibrated
+estimate errs high and reaches the exact count sooner.
 """
 
 from __future__ import annotations
@@ -25,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 CHARS_PER_TOKEN = 3.0
 EXACT_ABOVE = 0.85  # below this share of the budget the estimate decides alone
+# actual/raw on first requests was 1.21 in every S6 trial (1.13-1.18 after compactions)
+FRESH_PRIOR = 1.25
+RATIO_RANGE = (1.0, 2.0)
 
 
 def request_tokens(usage: Usage) -> int:
@@ -78,13 +87,18 @@ class ContextMeter:
         self._last_output = 0
         self._sent = 0  # how many messages the last request carried
         self._fresh = True  # nothing sent since the start (or the last compaction)
+        self._fresh_raw = 0  # chars/3 of the last from-scratch estimate
+        self.ratio = FRESH_PRIOR  # actual/raw, measured on the last from-scratch request
 
     def estimate(self, system: str, tools: list[ToolSpec], messages: list[Message]) -> int:
         """The next request's size: exact up to the last request, estimated after it."""
         if self._fresh:
-            return estimate_tokens(system) + estimate_tokens(tools) + estimate_tokens(messages)
+            raw = estimate_tokens(system) + estimate_tokens(tools) + estimate_tokens(messages)
+            self._fresh_raw = raw
+            return math.ceil(raw * self.ratio)
         # messages[self._sent] is the reply to the last request: its output tokens.
-        return self._last + self._last_output + estimate_tokens(messages[self._sent + 1 :])
+        tail = estimate_tokens(messages[self._sent + 1 :])
+        return self._last + self._last_output + math.ceil(tail * self.ratio)
 
     async def measure(
         self, system: str, tools: list[ToolSpec], messages: list[Message]
@@ -105,6 +119,9 @@ class ContextMeter:
     def observe(self, usage: Usage, messages_sent: int) -> int:
         """Record a response: the request it answered was exactly this big."""
         self._last = request_tokens(usage)
+        if self._fresh and self._fresh_raw and self._last:
+            lo, hi = RATIO_RANGE
+            self.ratio = min(hi, max(lo, self._last / self._fresh_raw))
         self._last_output = usage.output_tokens
         self._sent = messages_sent
         self._fresh = False

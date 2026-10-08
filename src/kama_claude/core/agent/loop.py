@@ -591,10 +591,17 @@ class AgentLoop:
         summarized and nothing older is replayed, so no thinking block outlives the
         prefix it was made in. Messages are replaced in place; the event lets replay
         do the same."""
-        if not state.meter.sizes or step < state.compact_after or messages[-1]["role"] != "user":
+        # Nothing to summarize but the goal: send it as is. A continuing session has its
+        # history before the goal, so its first step may compact.
+        if len(messages) <= 1 or step < state.compact_after or messages[-1]["role"] != "user":
             return
         tokens, how = await state.meter.measure(system, tools, messages)
-        if tokens <= max(self._context_budget, state.compact_floor + self._context_budget // 4):
+        # A summary that was itself over the budget sets a floor: compacting again before
+        # the context grows past it would only buy the same summary. Under the budget it
+        # is no floor at all (that rule let runs exceed the budget by up to 25%).
+        budget = self._context_budget
+        floor = state.compact_floor
+        if tokens <= (budget if floor <= budget else floor + budget // 4):
             return
         assert isinstance(self._provider, Compactor)
         t0 = time.monotonic()

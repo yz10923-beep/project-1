@@ -4,6 +4,7 @@ measured. With KAMA_CONTEXT=false nothing the model sees changes (the S5 agent).
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,12 @@ import pytest
 from kama_claude.core.agent.runner import run_goal
 from kama_claude.core.bus.events import Event, RunFinishedEvent, ToolFinishedEvent
 from kama_claude.core.config import Settings
-from kama_claude.core.context import ContextMeter, estimate_tokens
+from kama_claude.core.context import (
+    FRESH_PRIOR,
+    RATIO_RANGE,
+    ContextMeter,
+    estimate_tokens,
+)
 from kama_claude.core.llm.anthropic_provider import AnthropicProvider
 from kama_claude.core.llm.types import Message, ToolCall, ToolSpec, Usage
 from kama_claude.core.outputs import OutputStore, cut
@@ -285,11 +291,38 @@ async def test_meter_is_exact_up_to_the_last_request_and_estimates_the_rest() ->
     m = ContextMeter(budget=10_000)
     msgs: list[Message] = [{"role": "user", "content": "go"}]
     first = m.estimate("sys", [], msgs)
-    assert first == estimate_tokens("sys") + estimate_tokens([]) + estimate_tokens(msgs)
+    raw = estimate_tokens("sys") + estimate_tokens([]) + estimate_tokens(msgs)
+    assert first == math.ceil(raw * FRESH_PRIOR)
     m.observe(Usage(input_tokens=5, cache_read_input_tokens=995, output_tokens=40), len(msgs))
     msgs += [{"role": "assistant", "content": "reply"}, {"role": "user", "content": "x" * 300}]
-    assert m.estimate("sys", [], msgs) == 1000 + 40 + estimate_tokens(msgs[2:])
+    tail = estimate_tokens(msgs[2:])
+    assert m.estimate("sys", [], msgs) == 1000 + 40 + math.ceil(tail * m.ratio)
     assert (m.peak, m.mean) == (1000, 1000)
+
+
+async def test_meter_calibrates_on_requests_estimated_from_scratch() -> None:
+    """Found in the S6 curves: chars/3 ran 11-21% low on whole requests (tool schemas
+    and JSON are dense), and a low estimate near the budget skips the exact count. A
+    from-scratch request measures the ratio; later estimates are scaled by it."""
+    m = ContextMeter(budget=10_000)
+    msgs: list[Message] = [{"role": "user", "content": "w" * 3000}]
+    raw = estimate_tokens("s") + estimate_tokens([]) + estimate_tokens(msgs)
+    assert m.estimate("s", [], msgs) == math.ceil(raw * FRESH_PRIOR)  # uncalibrated: high
+    m.observe(Usage(input_tokens=round(raw * 1.2)), len(msgs))
+    assert m.ratio == pytest.approx(1.2, abs=0.01)
+    msgs += [{"role": "assistant", "content": "r"}, {"role": "user", "content": "x" * 900}]
+    last = round(raw * 1.2)
+    assert m.estimate("s", [], msgs) == last + math.ceil(estimate_tokens(msgs[2:]) * m.ratio)
+    m.observe(Usage(input_tokens=5_000), len(msgs))  # an incremental request: no change
+    assert m.ratio == pytest.approx(1.2, abs=0.01)
+    m.restart()  # a compaction: the next request is estimated from scratch again
+    assert m.estimate("s", [], msgs[:1]) == math.ceil(raw * m.ratio)
+    m.observe(Usage(input_tokens=raw * 5), 1)
+    assert m.ratio == RATIO_RANGE[1]  # clamped: one odd request can't blow it up
+    m.restart()
+    m.estimate("s", [], msgs[:1])
+    m.observe(Usage(input_tokens=1), 1)
+    assert m.ratio == RATIO_RANGE[0]  # never below chars/3
 
 
 async def test_meter_counts_exactly_only_near_the_budget() -> None:

@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); next: S6 follow-ups (long-refactor spec, meter calibration), then S7**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups 1-2 built (spec fix, tiers, meter calibration + compaction-rule fixes); next: re-run the long-* tasks, then S7**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -205,9 +205,11 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   sent exactly as returned, with the beta header; nothing older is re-sent, so no
   thinking block outlives its prefix. The resume turn restates the goal and the plan
   from the run's own records, not from the summary.
-- Compaction waits for the context to grow past the first request after the last one
-  (a summary still over budget must not trigger a compaction every step), and after a
-  failed one waits a few steps. Its usage is billed into the run like any call.
+- Compaction runs whenever the next request would exceed the budget and there is
+  history besides the goal (a continuing session can compact at step 1). Only a summary
+  still over the budget sets a floor the context must grow past first (else it would
+  compact every step); after a failed one it waits a few steps. Its usage is billed
+  into the run like any call.
 - Each `tool_use` gets exactly one `tool_result`, same order, all in one user message.
 - Every run writes `run.started` first and `run.finished` last, even on API errors,
   internal bugs and cancellation. `events.jsonl` alone must be enough to reconstruct a run.
@@ -286,8 +288,9 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   whole line and names the next offset. KAMA_CONTEXT=false = the S1 middle cut and no
   read_output (the S5 agent).
 - A request's size is exact from its usage (input + cache read + cache write); only the
-  part appended since is estimated. llm.call spans record both, so the estimator's error
-  is measured; run.finished records the peak.
+  part appended since is estimated, at chars/3 scaled by a ratio each from-scratch
+  request calibrates. llm.call spans record both, so the estimator's error is measured;
+  run.finished records the peak.
 
 - Evals grade the end state of a fresh workspace with hidden checks, never the agent's
   own claims. Every task has an `oracle/` that passes and at least one `wrong/` that

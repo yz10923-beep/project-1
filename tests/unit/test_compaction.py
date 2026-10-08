@@ -325,6 +325,49 @@ async def test_a_summary_still_over_budget_does_not_compact_every_step(tmp_path:
     assert len(p.compact_requests) == 1
 
 
+async def test_a_summary_under_the_budget_sets_no_floor(tmp_path: Path) -> None:
+    """Found in the S6 curves: the floor rule above also held back compaction when the
+    summary was *under* the budget, so long-refactor ran up to 25% over it. Now an
+    under-budget summary is no floor: over the budget means compact."""
+    near = Usage(input_tokens=20, cache_read_input_tokens=9_000, output_tokens=1_200)
+    p = CompactingProvider(
+        [
+            sized(tool_response(("t1", "read_file", {"path": "a.txt"})), BIG),
+            sized(tool_response(("t2", "list_dir", {})), near),  # 9,020 after the summary
+            sized(text_response("1 line."), SMALL),  # 9,020 + 1,200 + tail > 10K
+        ]
+    )
+    _, _, events = await _run(_settings(tmp_path), _ws(tmp_path), p)
+    assert [e.step for e in events if isinstance(e, ContextCompactedEvent)] == [2, 3]
+
+
+async def test_a_continuing_session_over_budget_compacts_at_its_first_step(
+    tmp_path: Path,
+) -> None:
+    """Found in the S6 curves: compaction waited for a measured request, so every later
+    run of long-session-recall sent its first request over the budget. A session's
+    history is there before the goal; only a lone goal has nothing to summarize."""
+    settings, ws = _settings(tmp_path), _ws(tmp_path)
+    (ws / "big.txt").write_text(("y" * 99 + "\n") * 280)  # 28,000 chars, under the cap
+    store = SessionStore(settings.sessions_dir)
+    sid = store.create(ws).session_id
+    # an earlier run that couldn't compact (its model doesn't) left a big history
+    earlier = ScriptedProvider(
+        [
+            sized(tool_response(("t1", "read_file", {"path": "big.txt"})), SMALL),
+            sized(text_response("read it"), SMALL),
+        ]
+    )
+    await _run(settings, ws, earlier, session_id=sid)
+    p = CompactingProvider([sized(text_response("100 chars a line"), SMALL)])
+    _, _, events = await _run(settings, ws, p, goal="How long are the lines?", session_id=sid)
+    [ev] = [e for e in events if isinstance(e, ContextCompactedEvent)]
+    assert ev.step == 1 and ev.measured == "estimate"
+    [asked] = p.compact_requests
+    assert asked.messages[-1]["content"][-1]["text"] == "How long are the lines?"
+    assert p.requests[0].messages[0]["content"][0]["type"] == "compaction"
+
+
 async def test_nothing_is_compacted_before_the_first_response(tmp_path: Path) -> None:
     """A goal bigger than the budget: the first request goes out as is (there is no
     history yet to summarize), and compaction waits for a measured request."""

@@ -647,7 +647,7 @@ thousands of tokens at most. S6 needs new tasks that force growth.
 1. **Accounting** (`core/context.py`, `ContextMeter`).
    - The size of the last request is exact from `usage` (input + cache read + cache
      creation). The next request is that plus the last output, plus an estimate of the
-     new content (chars/3, conservative).
+     new content (chars/3; measured later to run low, then calibrated per run).
    - `count_tokens` is called only when the estimate is within 15% of the budget, so
      the decision to compact rests on an exact count.
    - Each `llm.call` span records `context_tokens`; `run.finished` records peak and mean.
@@ -768,7 +768,7 @@ S6 lands in four parts, committed as `S6 (n/4): ...` like S5's three.
      mode as a read. `read_file` and `read_output` cut lines over 2000 chars
      (minified files).
    - **Accounting** (`core/context.py`, `ContextMeter`). Sizes are exact from usage;
-     the unsent tail is estimated (chars/3, high on purpose). An exact
+     the unsent tail is estimated (chars/3, scaled by a per-run ratio). An exact
      `count_tokens` is used near the budget, falling back to the estimate if it fails.
      Every `llm.call` span records `context_tokens` and `context_estimate`, and
      `run.finished` records `context_peak`. The meter measures with context off too:
@@ -929,8 +929,23 @@ What the run found:
   - the exact count only starts at 85% of the budget, which at 12K leaves a 1.8K
     margin, while at 120K it leaves 18K.
 
-  To confirm, from the traces (on the VM, git-ignored), per step: estimate vs actual,
-  and how each compaction was decided.
+  Confirmed from the traces (`scripts/context_curves.py`, 133 calls of the long-*
+  tasks, `s6-full/context-curves.txt`). Three causes, the first one not the expected one:
+  - **The floor rule** caused most long-refactor overshoots. After a compaction, the
+    next one waited until the context passed `floor + budget/4`, where the floor is
+    the first request after the summary. That rule exists for summaries still *over*
+    the budget, but it also applied to summaries under it: at 12K, a 10.9K summary
+    request let the context reach 13.6K before compacting.
+  - **The guard "no measured request yet"** blocked compaction at step 1 of every
+    continuing session run. All long-session-recall overshoots (12.1-13.3K) were the
+    first request of runs 2-5, which carry the earlier runs' history.
+  - **The estimator runs low, not high.** Whole requests estimated from scratch (the
+    first, and the first after each compaction) came in 11-21% under the actual size;
+    the step-1 ratio was 1.21 in every trial. Appended tails were within about 3%.
+    Median error -2%, range -21% to +1%, 105 of 133 calls under. Near the budget the
+    exact count decides, so this mattered mostly where the first two prevented a count.
+  - Also: post-compaction requests sit at 7.5-11K against 12K, so long-refactor
+    compacted every 2-4 steps. The budget is tighter than the task's working set.
 
 Status: S6 is built and measured. The done-criterion is met for "measured quality
 loss" (with the caveats above) and approximately for "under budget" (at most 25% over,
@@ -944,9 +959,16 @@ S6 follow-ups:
      s4-full to s6-full are `tier = "regression"`. They run once at a stage's end at
      1 rep (about $1.80), not in every A/B. They cost $5.48 per arm per run and told S6
      nothing new. See EVALS.md section 8.
-2. Confirm the overshoot from the traces, then calibrate the meter: use the first
-   request's exact prefix size and a per-run chars-per-token ratio, or count exactly
-   from 70%.
+2. (done) The overshoot is confirmed and fixed (see "Peaks went over the budget"):
+   - the floor applies only when the summary request was itself over the budget;
+   - compaction may run at step 1 when there is history before the goal (only a lone
+     goal has nothing to summarize);
+   - the meter calibrates itself: each request estimated from scratch sets the
+     actual/chars-3 ratio (clamped to 1-2) that later estimates are scaled by, starting
+     at 1.25 until one is measured.
+
+   Each has a test that fails on the old code. Re-run the long-* tasks to confirm peaks
+   stay at or under the budget.
 3. Optional: a cost lever. Compaction at effort `low` vs `high` on the long-* tasks
    (output is the biggest item, and the summarizer thinks at the conversation's
    effort). No kept turns, so the kept-thinking constraint doesn't apply.
@@ -1004,8 +1026,12 @@ S6 follow-ups:
   since S1. The growth that matters is accumulation, not single results.
 - **"How good is your token estimate?"** It's measured, not assumed: every model call
   records the estimate next to the exact size, and `kama trace` prints the median
-  error. The estimate is biased high on purpose (chars/3), since a late compaction
-  costs more than an early one.
+  error. I assumed chars/3 ran high; the traces said 11-21% *low* on whole requests
+  (tool-schema JSON is dense), so the meter now calibrates a ratio on every request
+  it estimates from scratch. The bigger lesson was elsewhere: the overshoot I blamed
+  on the estimator was mostly two decision rules (a floor that applied under the
+  budget, and a guard that skipped step 1 of continuing sessions). Measuring each
+  decision, not just the totals, is what found them.
 - **Finance angle:** an incident-triage agent reads logs far bigger than any context
   window. Here a 200K-line gateway log is the test bed. The skills are narrowing the
   query, paging what was cut, and keeping exact identifiers (timestamps, counts)
