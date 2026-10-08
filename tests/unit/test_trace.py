@@ -362,3 +362,17 @@ def test_with_context_off_the_curve_is_drawn_without_a_budget() -> None:
     ]
     text = render(off, width=20)
     assert "context  governance off · peak 4.0K" in text and "┊" not in text
+
+
+def test_a_trace_that_cannot_be_written_never_ends_the_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Found in s6-cal: a run dir deleted mid-run raised out of a span's __exit__ and
+    crashed the suite. Spans are dropped with one warning; the code they wrap goes on."""
+    run_dir = tmp_path / "run"
+    tracer = Tracer("t1", JsonlSpanWriter(run_dir / TRACE_FILE))
+    run_dir.rmdir()
+    for _ in range(3):
+        with tracer.span("llm.call", "llm"):
+            pass
+    assert sum("cannot write trace" in r.message for r in caplog.records) == 1

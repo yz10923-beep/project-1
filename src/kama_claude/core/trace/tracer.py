@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import secrets
 import time
 from collections.abc import Iterator, Mapping
@@ -20,6 +21,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from kama_claude.core.trace.span import Span, SpanKind, SpanStatus
+
+logger = logging.getLogger(__name__)
 
 
 class SpanSink(Protocol):
@@ -33,10 +36,18 @@ class JsonlSpanWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._warned = False
 
     def write(self, span: Span) -> None:
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(span.model_dump_json() + "\n")
+        # The trace observes a run; it must never be what ends one (a run dir deleted
+        # mid-run once crashed the whole eval suite from a span's __exit__).
+        try:
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(span.model_dump_json() + "\n")
+        except OSError as e:
+            if not self._warned:
+                self._warned = True
+                logger.warning("cannot write trace %s (%s); dropping its spans", self.path, e)
 
 
 class ActiveSpan:

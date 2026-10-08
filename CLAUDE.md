@@ -240,6 +240,7 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
 - Parent links come from a ContextVar, never a global: concurrent tasks must not nest
   into each other. A span from another trace becomes a `linked_span` attr, not a parent.
 - Span start is wall-clock (timeline placement); duration is monotonic (NTP-safe).
+- A trace that can't be written drops its spans with one warning; it never ends a run.
 - Unknown prices are None ("cost unknown"), never $0. Secrets (the token) never reach
   a trace.
 - The daemon shares one SDK client per API key (built at startup): constructing one
@@ -300,7 +301,9 @@ evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/
   `errors.jsonl` and never count as a score. A context overflow is not infra: the
   agent's history outgrew the window, so it is graded (`context_overflow`). A variant
   is one condition (harness, model, effort, memory, policy, context, sandbox); a trial
-  that differs stops the suite. Paid runs are tiered: per change, only the core tasks the
+  that differs stops the suite. A trial is scored only from a complete events.jsonl
+  (run.finished last); a harness crash is a `harness_error` and stops new trials. One
+  `run` per variant at a time (a lock file). Paid runs are tiered: per change, only the core tasks the
   change can affect; the regression tier at a stage's end at 1 rep. Only the user
   approves the harness hash (`--approve-harness`); never pass it on their behalf.
 

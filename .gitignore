@@ -14,3 +14,4 @@ build/
 evals/results/**/events/
 evals/results/**/traces/
 evals/results/**/report.html
+evals/results/**/.lock

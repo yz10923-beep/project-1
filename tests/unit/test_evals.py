@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import pytest
 from evals.harness import (
     RunConfig,
     SuiteAborted,
+    _variant_lock,
     check_parts,
     compare,
     load_tasks,
@@ -91,6 +93,43 @@ async def test_resume_skips_scored_trials(tmp_path: Path) -> None:
     await run_suite(load_tasks(["fix-add-bug"]), cfg)
     await run_suite(load_tasks(["fix-add-bug"]), cfg)
     assert calls == 2 and len(rows(cfg)) == 2
+
+
+async def test_a_trial_that_crashes_the_harness_is_recorded_and_stops_the_suite(
+    tmp_path: Path,
+) -> None:
+    """Reproduces s6-cal: the trial's run dir disappeared mid-run. It used to raise out
+    of run_suite with a traceback per task. Now: one harness_error, no score, a clean
+    abort (nothing new starts)."""
+    events_dir: list[Path] = []
+
+    class Deleting(ScriptedProvider):
+        async def complete(self, **kw: Any) -> LLMResponse:
+            shutil.rmtree(events_dir[0], ignore_errors=True)
+            return await super().complete(**kw)
+
+    def factory(s: Settings) -> ScriptedProvider:
+        events_dir.append(s.runs_dir)
+        return Deleting(solve_script())
+
+    cfg = cfg_for(tmp_path, factory, reps=2, concurrency=1)
+    with pytest.raises(SuiteAborted, match="harness crashed on fix-add-bug rep0"):
+        await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    [err] = rows(cfg, "errors.jsonl")
+    assert (err["class"], err["rep"]) == ("harness_error", 0)
+    assert rows(cfg) == [] and len(events_dir) == 1  # rep1 never started
+
+
+async def test_one_run_per_variant_at_a_time(tmp_path: Path) -> None:
+    """A second run of a variant would restart its unscored trials and delete the live
+    run dirs of the first (the likely cause of the s6-cal crash)."""
+    cfg = cfg_for(tmp_path, lambda s: ScriptedProvider(solve_script()))
+    cfg.variant_dir.mkdir(parents=True)
+    with _variant_lock(cfg.variant_dir):
+        with pytest.raises(SuiteAborted, match="another run is using variant"):
+            await run_suite(load_tasks(["fix-add-bug"]), cfg)
+    await run_suite(load_tasks(["fix-add-bug"]), cfg)  # released: runs
+    assert len(rows(cfg)) == 1
 
 
 async def test_serving_errors_are_retried_and_kept_out_of_scores(tmp_path: Path) -> None:

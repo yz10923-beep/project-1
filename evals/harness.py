@@ -15,11 +15,14 @@ Output (per variant, e.g. evals/results/kama-run/baseline/):
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
 import functools
 import hashlib
 import importlib.util
 import json
 import math
+import os
 import random
 import re
 import shutil
@@ -29,8 +32,9 @@ import sys
 import tempfile
 import time
 import tomllib
+import traceback
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -692,6 +696,13 @@ async def _run_all(task: Task, ws: Path, settings: Settings, provider: LLMProvid
             mode="auto",  # unattended, like -y: nobody answers an ask, so asks are denies
         )
         events = read_events(run_dir / "events.jsonl")
+        if not (events and isinstance(events[-1], RunFinishedEvent)):
+            # every run writes run.finished last; without it the row would be built from
+            # a partial log (no usage, no conditions) and scored as if it were whole
+            raise RuntimeError(
+                f"{run_dir.name}: events.jsonl is missing or incomplete ({len(events)} "
+                "events); was the run dir deleted during the run?"
+            )
         started = [e for e in events if isinstance(e, ToolStartedEvent)]
         denied_ids = {
             e.tool_use_id for e in events if isinstance(e, ToolFinishedEvent) and e.denied
@@ -881,9 +892,37 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
     return None
 
 
+@contextlib.contextmanager
+def _variant_lock(vdir: Path) -> Iterator[None]:
+    """One `run` per variant at a time. A second one would start the same unscored
+    trials, and each attempt begins by clearing its events dir: it would delete the
+    first run's live run dirs (this crashed s6-cal)."""
+    with (vdir / ".lock").open("a+", encoding="utf-8") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fh.seek(0)
+            holder = fh.read().strip() or "unknown pid"
+            raise SuiteAborted(
+                f"another run is using variant {vdir.name} ({holder}); "
+                "wait for it to finish or use another --variant"
+            ) from None
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"pid {os.getpid()}")
+        fh.flush()
+        yield  # closing the file releases the lock, also if the process dies
+
+
 async def run_suite(tasks: list[Task], cfg: RunConfig) -> None:
     vdir = cfg.variant_dir
     vdir.mkdir(parents=True, exist_ok=True)
+    with _variant_lock(vdir):
+        await _run_suite(tasks, cfg)
+
+
+async def _run_suite(tasks: list[Task], cfg: RunConfig) -> None:
+    vdir = cfg.variant_dir
     _write_state_file(cfg.results_dir)
     done = done_keys(vdir)
     scored, _ = _load_rows(vdir)
@@ -902,7 +941,21 @@ async def run_suite(tasks: list[Task], cfg: RunConfig) -> None:
         async with sem:
             if cfg.abort_reason:
                 return
-            row = await run_trial(task, rep, cfg)
+            try:
+                row = await run_trial(task, rep, cfg)
+            except Exception as e:
+                # A harness bug: recorded, never a score. The trials already running
+                # finish; no new one starts (it would likely crash the same way).
+                traceback.print_exc()
+                why = f"{type(e).__name__}: {e}"
+                _append(
+                    vdir / "errors.jsonl",
+                    {"prompt_id": task.id, "rep": rep, "class": "harness_error", "error": why},
+                )
+                cfg.abort_reason = cfg.abort_reason or (
+                    f"the harness crashed on {task.id} rep{rep}: {why}"
+                )
+                row = None
         if row is None:
             print(f"  {task.id} rep{rep}: NOT SCORED (see errors.jsonl)")
             return

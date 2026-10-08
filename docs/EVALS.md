@@ -205,6 +205,9 @@ Each of these prevents a specific way to get a confident but wrong number:
 | Harness hash must be approved by you | `--approve-harness` | scores silently changing because a grader got easier |
 | Answer-key access flagged | `leak_suspect` | the agent `cat`-ing `check.py` |
 | Resume per (task, rep) | `done_keys` | a crash costing the trials that already finished |
+| Scored only from a complete event log (`run.finished` last) | `_run_all` | a row built from a partial log (no usage, no conditions) |
+| A harness crash is a `harness_error`; no new trial starts | `run_suite` | one bug traceback per remaining trial, and spend on trials that crash the same way |
+| One `run` per variant at a time | `_variant_lock` | a second run restarting the same trials and deleting the first one's live run dirs (s6-cal) |
 
 **Closed in S5:** an agent's bash used to be able to read `evals/tasks/*/check.py`; the
 harness could only flag it (`leak_suspect`). Now the eval directory is a private path
