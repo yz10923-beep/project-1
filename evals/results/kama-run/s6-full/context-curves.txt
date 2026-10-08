@@ -1,42 +1,177 @@
-evals/results/kama-run/s6-full/events/long-refactor_rep0_a1/20261008-045846-0ccd03/trace.jsonl
-  step   5 COMPACT tokens_before 18530 measured count status ok
-  step   7 COMPACT tokens_before 13568 measured count status ok
-  step   8 COMPACT tokens_before 16272 measured count status ok
-  step  11 COMPACT tokens_before 14951 measured count status ok
-  step  15 COMPACT tokens_before 14922 measured count status ok
-  step  23 COMPACT tokens_before 12076 measured count status ok
-evals/results/kama-run/s6-full/events/long-refactor_rep1_a1/20261008-045929-7a97e9/trace.jsonl
-  step   5 COMPACT tokens_before 18963 measured count status ok
-  step   6 COMPACT tokens_before 13243 measured count status ok
-  step   7 COMPACT tokens_before 13583 measured count status ok
-  step  10 COMPACT tokens_before 13800 measured count status ok
-  step  13 COMPACT tokens_before 18555 measured count status ok
-  step  19 COMPACT tokens_before 12784 measured count status ok
-evals/results/kama-run/s6-full/events/long-refactor_rep2_a1/20261008-050521-fb10eb/trace.jsonl
-  step   5 COMPACT tokens_before 19179 measured count status ok
-  step   9 COMPACT tokens_before 12408 measured count status ok
-  step  10 COMPACT tokens_before 17873 measured count status ok
-  step  12 COMPACT tokens_before 13047 measured count status ok
-  step  15 COMPACT tokens_before 12537 measured count status ok
-  step  20 COMPACT tokens_before 12558 measured count status ok
-evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050747-60ad96/trace.jsonl
-evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050801-7ae2bc/trace.jsonl
-evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050834-71051a/trace.jsonl
-evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050847-361116/trace.jsonl
-  step   2 COMPACT tokens_before 13417 measured count status ok
-evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050953-805264/trace.jsonl
-  step   2 COMPACT tokens_before 13000 measured count status ok
-evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051034-ca0431/trace.jsonl
-evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051049-0b360a/trace.jsonl
-  step   2 COMPACT tokens_before 27019 measured count status ok
-evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051137-9ac199/trace.jsonl
-evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051151-ca9ea9/trace.jsonl
-  step   2 COMPACT tokens_before 13539 measured count status ok
-evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051255-23851b/trace.jsonl
-  step   4 COMPACT tokens_before 12498 measured count status ok
-evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051216-405834/trace.jsonl
-evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051236-f6d45d/trace.jsonl
-evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051333-b69579/trace.jsonl
-evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051348-f8a4fa/trace.jsonl
-  step   2 COMPACT tokens_before 13531 measured count status ok
-evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051444-0e8be6/trace.jsonl
+long-refactor_rep0_a1/20261008-045846-0ccd03/trace.jsonl
+  step   1  estimate    3576  actual    4320  err  -17%
+  step   2  estimate    4823  actual    4940  err   -2%
+  step   3  estimate    5921  actual    6077  err   -3%
+  step   4  estimate    6849  actual    7078  err   -3%
+  step   5  COMPACT  tokens_before 18530  measured count  ok
+  step   5  estimate    6602  actual    7477  err  -12%
+  step   6  estimate    8163  actual    8301  err   -2%
+  step   7  COMPACT  tokens_before 13568  measured count  ok
+  step   7  estimate    7543  actual    8584  err  -12%
+  step   8  COMPACT  tokens_before 16272  measured count  ok
+  step   8  estimate    8227  actual    9436  err  -13%
+  step   9  estimate   10591  actual   10651  err   -1%
+  step  10  estimate   11222  actual   11357  err   -1%
+  step  11  COMPACT  tokens_before 14951  measured count  ok
+  step  11  estimate    9411  actual   10914  err  -14%
+  step  12  estimate   11543  actual   11604  err   -1%
+  step  13  estimate   11878  actual   11861  err   +0%
+  step  14  estimate   13476  actual   13765  err   -2% OVER BUDGET
+  step  15  COMPACT  tokens_before 14922  measured count  ok
+  step  15  estimate    7663  actual    8817  err  -13%
+  step  16  estimate    9242  actual    9314  err   -1%
+  step  17  estimate    9825  actual    9911  err   -1%
+  step  18  estimate   10256  actual   10290  err   -0%
+  step  19  estimate   10500  actual   10473  err   +0%
+  step  20  estimate   10865  actual   10836  err   +0%
+  step  21  estimate   11202  actual   11228  err   -0%
+  step  22  estimate   11832  actual   11855  err   -0%
+  step  23  COMPACT  tokens_before 12076  measured count  ok
+  step  23  estimate    6939  actual    7835  err  -11%
+  step  24  estimate    8425  actual    8482  err   -1%
+  step  25  estimate    9233  actual    9333  err   -1%
+  step  26  estimate    9748  actual    9743  err   +0%
+long-refactor_rep1_a1/20261008-045929-7a97e9/trace.jsonl
+  step   1  estimate    3576  actual    4322  err  -17%
+  step   2  estimate    4824  actual    4941  err   -2%
+  step   3  estimate    5751  actual    5886  err   -2%
+  step   4  estimate    9952  actual   10501  err   -5%
+  step   5  COMPACT  tokens_before 18963  measured count  ok
+  step   5  estimate    7703  actual    8831  err  -13%
+  step   6  COMPACT  tokens_before 13243  measured count  ok
+  step   6  estimate    8509  actual    9960  err  -15%
+  step   7  COMPACT  tokens_before 13583  measured count  ok
+  step   7  estimate    8835  actual   10418  err  -15%
+  step   8  estimate   11875  actual   11845  err   +0%
+  step   9  estimate   12293  actual   12376  err   -1% OVER BUDGET
+  step  10  COMPACT  tokens_before 13800  measured count  ok
+  step  10  estimate   10597  actual   12465  err  -15% OVER BUDGET
+  step  11  estimate   13230  actual   13322  err   -1% OVER BUDGET
+  step  12  estimate   14891  actual   15010  err   -1% OVER BUDGET
+  step  13  COMPACT  tokens_before 18555  measured count  ok
+  step  13  estimate    8299  actual    9631  err  -14%
+  step  14  estimate   10336  actual   10505  err   -2%
+  step  15  estimate   11291  actual   11264  err   +0%
+  step  16  estimate   11710  actual   11788  err   -1%
+  step  17  estimate   12123  actual   12137  err   -0% OVER BUDGET
+  step  18  estimate   12364  actual   12329  err   +0% OVER BUDGET
+  step  19  COMPACT  tokens_before 12784  measured count  ok
+  step  19  estimate    7029  actual    7925  err  -11%
+  step  20  estimate    8689  actual    8837  err   -2%
+  step  21  estimate    9589  actual    9629  err   -0%
+  step  22  estimate   10046  actual   10000  err   +0%
+  step  23  estimate   10425  actual   10464  err   -0%
+  step  24  estimate   10723  actual   10728  err   -0%
+  step  25  estimate   11248  actual   11309  err   -1%
+  step  26  estimate   11616  actual   11585  err   +0%
+long-refactor_rep2_a1/20261008-050521-fb10eb/trace.jsonl
+  step   1  estimate    3576  actual    4323  err  -17%
+  step   2  estimate    4823  actual    4940  err   -2%
+  step   3  estimate    5915  actual    6069  err   -3%
+  step   4  estimate    6829  actual    7057  err   -3%
+  step   5  COMPACT  tokens_before 19179  measured count  ok
+  step   5  estimate    7543  actual    8740  err  -14%
+  step   6  estimate    9243  actual    9280  err   -0%
+  step   7  estimate   10078  actual   10047  err   +0%
+  step   8  estimate   10247  actual   10204  err   +0%
+  step   9  COMPACT  tokens_before 12408  measured count  ok
+  step   9  estimate    8187  actual    9496  err  -14%
+  step  10  COMPACT  tokens_before 17873  measured count  ok
+  step  10  estimate    8314  actual    9806  err  -15%
+  step  11  estimate   11365  actual   11701  err   -3%
+  step  12  COMPACT  tokens_before 13047  measured count  ok
+  step  12  estimate    7923  actual    9247  err  -14%
+  step  13  estimate   10020  actual   10233  err   -2%
+  step  14  estimate   11614  actual   11661  err   -0%
+  step  15  COMPACT  tokens_before 12537  measured count  ok
+  step  15  estimate    8128  actual    9545  err  -15%
+  step  16  estimate   10191  actual   10299  err   -1%
+  step  17  estimate   10785  actual   10792  err   -0%
+  step  18  estimate   11290  actual   11327  err   -0%
+  step  19  estimate   12025  actual   12139  err   -1% OVER BUDGET
+  step  20  COMPACT  tokens_before 12558  measured count  ok
+  step  20  estimate    7091  actual    8011  err  -11%
+  step  21  estimate    8541  actual    8568  err   -0%
+  step  22  estimate    9115  actual    9090  err   +0%
+  step  23  estimate    9610  actual    9605  err   +0%
+long-session-recall_rep0_a1/20261008-050747-60ad96/trace.jsonl
+  step   1  estimate    3541  actual    4258  err  -17%
+  step   2  estimate    4726  actual    4993  err   -5%
+  step   3  estimate    5248  actual    5252  err   -0%
+  step   4  estimate    5635  actual    5604  err   +1%
+long-session-recall_rep0_a1/20261008-050801-7ae2bc/trace.jsonl
+  step   1  estimate    5461  actual    6179  err  -12%
+  step   2  estimate    6501  actual    6568  err   -1%
+  step   3  estimate    7316  actual    7719  err   -5%
+  step   4  estimate    7961  actual    7934  err   +0%
+  step   5  estimate    8208  actual    8177  err   +0%
+long-session-recall_rep0_a1/20261008-050834-71051a/trace.jsonl
+  step   1  estimate    8361  actual    9812  err  -15%
+  step   2  estimate   10528  actual   10810  err   -3%
+long-session-recall_rep0_a1/20261008-050847-361116/trace.jsonl
+  step   1  estimate   10296  actual   12171  err  -15% OVER BUDGET
+  step   2  COMPACT  tokens_before 13417  measured count  ok
+  step   2  estimate    7256  actual    9178  err  -21%
+  step   3  estimate   10135  actual   10595  err   -4%
+long-session-recall_rep0_a1/20261008-050953-805264/trace.jsonl
+  step   1  estimate   10268  actual   12731  err  -19% OVER BUDGET
+  step   2  COMPACT  tokens_before 13000  measured count  ok
+  step   2  estimate    6193  actual    6890  err  -10%
+  step   3  estimate    7439  actual    7552  err   -1%
+  step   4  estimate    8491  actual    8552  err   -1%
+long-session-recall_rep1_a1/20261008-051034-ca0431/trace.jsonl
+  step   1  estimate    3541  actual    4256  err  -17%
+  step   2  estimate    4724  actual    4991  err   -5%
+  step   3  estimate    5300  actual    5306  err   -0%
+  step   4  estimate    5630  actual    5599  err   +1%
+long-session-recall_rep1_a1/20261008-051049-0b360a/trace.jsonl
+  step   1  estimate    5488  actual    6232  err  -12%
+  step   2  COMPACT  tokens_before 27019  measured count  ok
+  step   2  estimate    5638  actual    6070  err   -7%
+  step   3  estimate    6946  actual    7305  err   -5%
+  step   4  estimate    7554  actual    7542  err   +0%
+  step   5  estimate    7825  actual    7794  err   +0%
+long-session-recall_rep1_a1/20261008-051137-9ac199/trace.jsonl
+  step   1  estimate    8675  actual    9507  err   -9%
+  step   2  estimate   10419  actual   10730  err   -3%
+long-session-recall_rep1_a1/20261008-051151-ca9ea9/trace.jsonl
+  step   1  estimate   10793  actual   12123  err  -11% OVER BUDGET
+  step   2  COMPACT  tokens_before 13539  measured count  ok
+  step   2  estimate    6692  actual    8209  err  -18%
+  step   3  estimate    9149  actual    9564  err   -4%
+long-session-recall_rep1_a1/20261008-051255-23851b/trace.jsonl
+  step   1  estimate    9174  actual   11571  err  -21%
+  step   2  estimate   11846  actual   11813  err   +0%
+  step   3  estimate   12012  actual   11990  err   +0%
+  step   4  COMPACT  tokens_before 12498  measured count  ok
+  step   4  estimate    6007  actual    6637  err   -9%
+  step   5  estimate    6838  actual    6827  err   +0%
+long-session-recall_rep2_a1/20261008-051216-405834/trace.jsonl
+  step   1  estimate    3541  actual    4258  err  -17%
+  step   2  estimate    4412  actual    4407  err   +0%
+  step   3  estimate    5123  actual    5680  err  -10%
+  step   4  estimate    5918  actual    5945  err   -0%
+  step   5  estimate    6665  actual    6660  err   +0%
+long-session-recall_rep2_a1/20261008-051236-f6d45d/trace.jsonl
+  step   1  estimate    6168  actual    7219  err  -15%
+  step   2  estimate    7548  actual    7597  err   -1%
+  step   3  estimate    7860  actual    7878  err   -0%
+  step   4  estimate    7993  actual    7966  err   +0%
+  step   5  estimate    8598  actual    8837  err   -3%
+  step   6  estimate    9170  actual    9182  err   -0%
+  step   7  estimate    9496  actual    9471  err   +0%
+long-session-recall_rep2_a1/20261008-051333-b69579/trace.jsonl
+  step   1  estimate   10248  actual   10950  err   -6%
+  step   2  estimate   11221  actual   11235  err   -0%
+  step   3  estimate   11726  actual   11907  err   -2%
+long-session-recall_rep2_a1/20261008-051348-f8a4fa/trace.jsonl
+  step   1  estimate   12590  actual   13267  err   -5% OVER BUDGET
+  step   2  COMPACT  tokens_before 13531  measured count  ok
+  step   2  estimate    6230  actual    7316  err  -15%
+  step   3  estimate    8192  actual    8554  err   -4%
+long-session-recall_rep2_a1/20261008-051444-0e8be6/trace.jsonl
+  step   1  estimate    8889  actual   10815  err  -18%
+  step   2  estimate   11088  actual   11055  err   +0%
+  step   3  estimate   11237  actual   11232  err   +0%
+
+133 calls · estimate error median -2%, min -21%, max +1% · underestimates 105
