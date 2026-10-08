@@ -1,0 +1,179 @@
+long-refactor_rep0_a1/20261008-073310-8f95b1/trace.jsonl
+  step   1  estimate    4519  actual    4363  err   +4%
+  step   2  estimate    4878  actual    4901  err   -0%
+  step   3  estimate   17744  actual   17225  err   +3%
+  step   4  estimate   18266  actual   18273  err   -0%
+  step   5  estimate   18755  actual   18745  err   +0%
+  step   6  estimate   19767  actual   19725  err   +0%
+  step   7  COMPACT  tokens_before 20475  measured count  ok  45s  4595 out
+  step   7  estimate    9480  actual    9315  err   +2%
+  step   8  estimate   19626  actual   19417  err   +1%
+  step   9  COMPACT  tokens_before 22720  measured count  ok  35s  3521 out
+  step   9  estimate    8450  actual    8241  err   +3%
+  step  10  estimate    9429  actual    9445  err   -0%
+  step  11  estimate   10807  actual   10941  err   -1%
+  step  12  estimate   11506  actual   11528  err   -0%
+  step  13  estimate   11808  actual   11769  err   +0%
+  time: run 194s · model calls 111s · compaction 80s in 2 (median 40s)
+long-refactor_rep1_a1/20261008-073310-6252e9/trace.jsonl
+  step   1  estimate    4519  actual    4362  err   +4%
+  step   2  estimate    4879  actual    4902  err   -0%
+  step   3  estimate    6039  actual    6004  err   +1%
+  step   4  estimate   17938  actual   17416  err   +3%
+  step   5  estimate   18357  actual   18371  err   -0%
+  step   6  estimate   18907  actual   18909  err   -0%
+  step   7  COMPACT  tokens_before 20589  measured count  ok  46s  4402 out
+  step   7  estimate    9383  actual    9143  err   +3%
+  step   8  estimate    9522  actual    9483  err   +0%
+  step   9  estimate    9873  actual    9886  err   -0%
+  step  10  estimate   10245  actual   10252  err   -0%
+  step  11  estimate   17642  actual   17405  err   +1%
+  step  12  estimate   18231  actual   18201  err   +0%
+  step  13  COMPACT  tokens_before 20132  measured count  ok  58s  3834 out
+  step  13  estimate    8590  actual    8593  err   -0%
+  step  14  estimate    9190  actual    9237  err   -1%
+  step  15  estimate    9679  actual    9654  err   +0%
+  step  16  estimate    9975  actual    9969  err   +0%
+  step  17  estimate   10352  actual   10281  err   +1%
+  step  18  estimate   10601  actual   10547  err   +1%
+  step  19  estimate   10858  actual   10842  err   +0%
+  step  20  estimate   12529  actual   12543  err   -0%
+  step  21  estimate   14470  actual   14803  err   -2%
+  step  22  estimate   18380  actual   18357  err   +0%
+  step  23  COMPACT  tokens_before 20754  measured count  ok  46s  4259 out
+  step  23  estimate    8992  actual    8998  err   -0%
+  step  24  estimate   16306  actual   16255  err   +0%
+  step  25  COMPACT  tokens_before 20034  measured count  ok  42s  3998 out
+  step  25  estimate    8675  actual    8737  err   -1%
+  step  26  estimate    9085  actual    9120  err   -0%
+  step  27  estimate   10401  actual   10495  err   -1%
+  step  28  estimate   11233  actual   11237  err   -0%
+  step  29  estimate   12443  actual   12449  err   -0%
+  step  30  estimate   13069  actual   13019  err   +0%
+  step  31  estimate   13564  actual   13564  err   +0%
+  step  32  estimate   13800  actual   13760  err   +0%
+  time: run 515s · model calls 316s · compaction 193s in 4 (median 46s)
+long-refactor_rep2_a1/20261008-073625-5b65a7/trace.jsonl
+  step   1  estimate    4519  actual    4361  err   +4%
+  step   2  estimate    4879  actual    4902  err   -0%
+  step   3  estimate   17747  actual   17248  err   +3%
+  step   4  estimate   18326  actual   18340  err   -0%
+  step   5  estimate   19055  actual   19039  err   +0%
+  step   6  estimate   19978  actual   19936  err   +0%
+  step   7  COMPACT  tokens_before 20372  measured count  ok  42s  3998 out
+  step   7  estimate    9012  actual    8729  err   +3%
+  step   8  estimate   10580  actual   10761  err   -2%
+  step   9  estimate   12915  actual   12796  err   +1%
+  step  10  estimate   14139  actual   14106  err   +0%
+  step  11  estimate   14457  actual   14400  err   +0%
+  step  12  estimate   15373  actual   15461  err   -1%
+  step  13  estimate   17701  actual   17714  err   -0%
+  step  14  estimate   19172  actual   19174  err   -0%
+  step  15  COMPACT  tokens_before 21017  measured count  ok  29s  2817 out
+  step  15  estimate    7887  actual    7572  err   +4%
+  step  16  estimate    8509  actual    8630  err   -1%
+  step  17  estimate    9305  actual    9329  err   -0%
+  time: run 214s · model calls 138s · compaction 71s in 2 (median 36s)
+long-session-recall_rep0_a1/20261008-074000-693545/trace.jsonl
+  step   1  estimate    4427  actual    4257  err   +4%
+  step   2  estimate    4801  actual    4992  err   -4%
+  step   3  estimate    5283  actual    5265  err   +0%
+  step   4  estimate    5583  actual    5594  err   -0%
+  step   5  estimate    5968  actual    5927  err   +1%
+  time: run 18s · model calls 18s · compaction 0s in 0
+long-session-recall_rep0_a1/20261008-074018-32e20d/trace.jsonl
+  step   1  estimate    7478  actual    6574  err  +14%
+  step   2  COMPACT  tokens_before 27376  measured count  ok  25s  1957 out
+  step   2  estimate    6432  actual    6390  err   +1%
+  step   3  estimate    7253  actual    7516  err   -3%
+  step   4  estimate    8079  actual    8100  err   -0%
+  step   5  estimate    8861  actual    9035  err   -2%
+  step   6  estimate    9503  actual    9490  err   +0%
+  time: run 61s · model calls 35s · compaction 25s in 1 (median 25s)
+long-session-recall_rep0_a1/20261008-074119-431292/trace.jsonl
+  step   1  estimate   12515  actual   11370  err  +10%
+  step   2  COMPACT  tokens_before 12405  measured count  ok  35s  2980 out
+  step   2  estimate    7136  actual    7361  err   -3%
+  step   3  estimate    7982  actual    8118  err   -2%
+  time: run 57s · model calls 21s · compaction 35s in 1 (median 35s)
+long-session-recall_rep0_a1/20261008-074216-6dbf0d/trace.jsonl
+  step   1  estimate   10787  actual    9863  err   +9%
+  step   2  estimate   10622  actual   10857  err   -2%
+  step   3  estimate   11510  actual   11469  err   +0%
+  time: run 24s · model calls 23s · compaction 0s in 0
+long-session-recall_rep0_a1/20261008-074239-4a048a/trace.jsonl
+  step   1  COMPACT  tokens_before 13893  measured count  ok  35s  3390 out
+  step   1  estimate    8258  actual    7630  err   +8%
+  step   2  estimate    7852  actual    7810  err   +1%
+  step   3  estimate    8059  actual    8054  err   +0%
+  step   4  estimate    8572  actual    8531  err   +0%
+  time: run 46s · model calls 11s · compaction 35s in 1 (median 35s)
+long-session-recall_rep1_a1/20261008-074147-030f8d/trace.jsonl
+  step   1  estimate    4427  actual    4256  err   +4%
+  step   2  estimate    4801  actual    4992  err   -4%
+  step   3  estimate    5316  actual    5304  err   +0%
+  step   4  estimate    5598  actual    5609  err   -0%
+  step   5  estimate    6087  actual    6046  err   +1%
+  time: run 16s · model calls 16s · compaction 0s in 0
+long-session-recall_rep1_a1/20261008-074203-5ca8cd/trace.jsonl
+  step   1  estimate    7715  actual    6705  err  +15%
+  step   2  COMPACT  tokens_before 27480  measured count  ok  25s  1797 out
+  step   2  estimate    6217  actual    6229  err   -0%
+  step   3  estimate    7375  actual    7919  err   -7%
+  step   4  estimate    8285  actual    8254  err   +0%
+  step   5  estimate    8639  actual    8658  err   -0%
+  step   6  estimate    9037  actual    9001  err   +0%
+  time: run 57s · model calls 31s · compaction 25s in 1 (median 25s)
+long-session-recall_rep1_a1/20261008-074300-1303aa/trace.jsonl
+  step   1  estimate   12522  actual   10966  err  +14%
+  step   2  COMPACT  tokens_before 12713  measured count  ok  35s  3506 out
+  step   2  estimate    7111  actual    7886  err  -10%
+  step   3  estimate    8651  actual    8811  err   -2%
+  step   4  estimate    9347  actual    9338  err   +0%
+  time: run 61s · model calls 25s · compaction 35s in 1 (median 35s)
+long-session-recall_rep1_a1/20261008-074401-0c8f38/trace.jsonl
+  step   1  estimate   11529  actual   10974  err   +5%
+  step   2  COMPACT  tokens_before 12722  measured count  ok  38s  3615 out
+  step   2  estimate    7763  actual    7978  err   -3%
+  step   3  estimate    8429  actual    8450  err   -0%
+  step   4  estimate    9069  actual    9048  err   +0%
+  time: run 68s · model calls 30s · compaction 38s in 1 (median 38s)
+long-session-recall_rep1_a1/20261008-074508-642d5d/trace.jsonl
+  step   1  estimate   11728  actual   11072  err   +6%
+  step   2  estimate   11405  actual   11362  err   +0%
+  step   3  estimate   11557  actual   11537  err   +0%
+  time: run 9s · model calls 9s · compaction 0s in 0
+long-session-recall_rep2_a1/20261008-074325-9ce9e2/trace.jsonl
+  step   1  estimate    4427  actual    4257  err   +4%
+  step   2  estimate    4801  actual    4992  err   -4%
+  step   3  estimate    5253  actual    5236  err   +0%
+  step   4  estimate    5614  actual    5570  err   +1%
+  time: run 11s · model calls 11s · compaction 0s in 0
+long-session-recall_rep2_a1/20261008-074336-9e08a2/trace.jsonl
+  step   1  estimate    6810  actual    6192  err  +10%
+  step   2  estimate    6543  actual    6581  err   -1%
+  step   3  estimate    7398  actual    7726  err   -4%
+  step   4  estimate    7973  actual    7936  err   +0%
+  step   5  estimate    8209  actual    8171  err   +0%
+  time: run 19s · model calls 19s · compaction 0s in 0
+long-session-recall_rep2_a1/20261008-074356-d21b80/trace.jsonl
+  step   1  estimate   10454  actual    9865  err   +6%
+  step   2  estimate   10709  actual   10947  err   -2%
+  step   3  estimate   11434  actual   11425  err   +0%
+  time: run 16s · model calls 15s · compaction 0s in 0
+long-session-recall_rep2_a1/20261008-074412-4d40fc/trace.jsonl
+  step   1  COMPACT  tokens_before 12852  measured count  ok  32s  2902 out
+  step   1  estimate    7679  actual    7219  err   +6%
+  step   2  estimate    8211  actual    8570  err   -4%
+  step   3  estimate    9055  actual    9053  err   +0%
+  time: run 54s · model calls 22s · compaction 32s in 1 (median 32s)
+long-session-recall_rep2_a1/20261008-074506-29775d/trace.jsonl
+  step   1  estimate   10908  actual   11031  err   -1%
+  step   2  estimate   11350  actual   11302  err   +0%
+  step   3  estimate   11644  actual   11631  err   +0%
+  step   4  COMPACT  tokens_before 12180  measured count  ok  36s  3950 out
+  step   4  estimate    8681  actual    8399  err   +3%
+  step   5  estimate    8662  actual    8647  err   +0%
+  time: run 53s · model calls 17s · compaction 36s in 1 (median 36s)
+
+125 calls · estimate error median +0%, min -10%, max +15% · underestimates 51
