@@ -1,1 +1,42 @@
 evals/results/kama-run/s6-full/events/long-refactor_rep0_a1/20261008-045846-0ccd03/trace.jsonl
+  step   5 COMPACT tokens_before 18530 measured count status ok
+  step   7 COMPACT tokens_before 13568 measured count status ok
+  step   8 COMPACT tokens_before 16272 measured count status ok
+  step  11 COMPACT tokens_before 14951 measured count status ok
+  step  15 COMPACT tokens_before 14922 measured count status ok
+  step  23 COMPACT tokens_before 12076 measured count status ok
+evals/results/kama-run/s6-full/events/long-refactor_rep1_a1/20261008-045929-7a97e9/trace.jsonl
+  step   5 COMPACT tokens_before 18963 measured count status ok
+  step   6 COMPACT tokens_before 13243 measured count status ok
+  step   7 COMPACT tokens_before 13583 measured count status ok
+  step  10 COMPACT tokens_before 13800 measured count status ok
+  step  13 COMPACT tokens_before 18555 measured count status ok
+  step  19 COMPACT tokens_before 12784 measured count status ok
+evals/results/kama-run/s6-full/events/long-refactor_rep2_a1/20261008-050521-fb10eb/trace.jsonl
+  step   5 COMPACT tokens_before 19179 measured count status ok
+  step   9 COMPACT tokens_before 12408 measured count status ok
+  step  10 COMPACT tokens_before 17873 measured count status ok
+  step  12 COMPACT tokens_before 13047 measured count status ok
+  step  15 COMPACT tokens_before 12537 measured count status ok
+  step  20 COMPACT tokens_before 12558 measured count status ok
+evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050747-60ad96/trace.jsonl
+evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050801-7ae2bc/trace.jsonl
+evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050834-71051a/trace.jsonl
+evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050847-361116/trace.jsonl
+  step   2 COMPACT tokens_before 13417 measured count status ok
+evals/results/kama-run/s6-full/events/long-session-recall_rep0_a1/20261008-050953-805264/trace.jsonl
+  step   2 COMPACT tokens_before 13000 measured count status ok
+evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051034-ca0431/trace.jsonl
+evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051049-0b360a/trace.jsonl
+  step   2 COMPACT tokens_before 27019 measured count status ok
+evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051137-9ac199/trace.jsonl
+evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051151-ca9ea9/trace.jsonl
+  step   2 COMPACT tokens_before 13539 measured count status ok
+evals/results/kama-run/s6-full/events/long-session-recall_rep1_a1/20261008-051255-23851b/trace.jsonl
+  step   4 COMPACT tokens_before 12498 measured count status ok
+evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051216-405834/trace.jsonl
+evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051236-f6d45d/trace.jsonl
+evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051333-b69579/trace.jsonl
+evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051348-f8a4fa/trace.jsonl
+  step   2 COMPACT tokens_before 13531 measured count status ok
+evals/results/kama-run/s6-full/events/long-session-recall_rep2_a1/20261008-051444-0e8be6/trace.jsonl
