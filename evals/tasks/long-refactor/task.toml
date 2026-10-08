@@ -16,4 +16,7 @@ Don't change the tests.
 """
 tags = ["refactor", "multi-file", "context", "finance", "positive"]
 max_steps = 30
-context_budget = 12000
+# 20K, not 12K: after a compaction the request is 7.5-12.5K (s6-full), so 12K left no
+# room to work and compacted every 2-4 steps, still up to 25% over. The off arm peaks
+# at 27-32K, so 20K still compacts mid-plan.
+context_budget = 20000

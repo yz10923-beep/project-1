@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups: spec fix, tiers, meter calibration, step-1 compaction (the floor-rule change thrashed in s6-cal and was reverted); next: long-refactor budget ~20K, re-run the long-* tasks, then S7**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups: spec fix, tiers, meter calibration, step-1 compaction (the floor-rule change thrashed in s6-cal and was reverted); long-refactor budget 20K; next: re-run the long-* tasks (s6-cal2), then S7**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands

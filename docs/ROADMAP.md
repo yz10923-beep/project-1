@@ -974,9 +974,9 @@ S6 follow-ups:
    it was stopped: long-refactor summaries sit at 8.5-11K of 12K, each step adds
    0.6-1.5K, so nearly every step paid for a compaction (~40s each), and the cost ran
    several times s6-full's ~$1.7 per trial. A test now pins it (5 steps with summaries
-   at 95% of the budget compact once, not 5 times). Next: give long-refactor a budget
-   its working set fits (about 20K; the off arm peaks at 27-32K, so it still compacts)
-   and re-run.
+   at 95% of the budget compact once, not 5 times). long-refactor's budget is now 20K,
+   which its working set fits (the off arm peaks at 27-32K, so it still compacts);
+   long-session-recall stays at 12K (off peaks 15-19K). Re-run both arms as s6-cal2.
 3. Optional: a cost lever. Compaction at effort `low` vs `high` on the long-* tasks
    (output is the biggest item, and the summarizer thinks at the conversation's
    effort). No kept turns, so the kept-thinking constraint doesn't apply.

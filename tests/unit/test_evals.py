@@ -309,8 +309,8 @@ async def test_a_task_can_set_its_own_context_budget(tmp_path: Path) -> None:
     """S6: low-budget tasks force compaction at eval size; with context off the task's
     budget is not applied (the S5 agent has none)."""
     [task] = load_tasks(["long-refactor"])
-    assert task.context_budget == 12000
-    for context, budget in ((True, 12000), (False, 120_000)):
+    assert task.context_budget == 20000
+    for context, budget in ((True, 20000), (False, 120_000)):
         cfg = cfg_for(tmp_path / str(context), lambda s: ScriptedProvider([text_response("no")]))
         cfg.settings = cfg.settings.model_copy(update={"context": context})
         await run_suite([task], cfg)
