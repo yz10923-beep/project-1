@@ -996,11 +996,21 @@ long-refactor rep 0 compacted 6 times with a peak of 11.9K (under 12K), $1.51, 4
 no worse than s6-full. Rep 1 hit the 900s trial timeout. The timeout row carried no
 usage, so the bill (about $10 across the crashed first attempt, s6-cal, and
 s6-cal-off) could not be reconciled from the results; timeout rows now record their
-spend. I reverted F2 calling it thrashing. A unit test shows it can thrash (summaries
-at 95% of the budget compact every step), and s6-full's summaries reached 12.5K of 12K.
-But rep 0 didn't thrash, and rep 1's trace (on the VM) is what would show whether it
-did or something else stalled. The revert stands on the hysteresis argument, not on
-this data.
+spend. Rep 1's trace (from the VM) settles it: **F2 thrashed.**
+- 15 compactions in 24 steps; from step 16 on, every step compacted. Compaction took
+  734s of the 900s (median 50s each); model calls only 162s. No call stalled, so
+  compaction doesn't need its own timeout.
+- The mechanism: **summaries of summaries grow.** Each summary keeps everything the
+  previous one kept, plus the new steps: its output went 2.5K → 3.4K → 3.8K → 5.0K →
+  5.5K → 6.0K → 6.6K tokens. The request after a compaction climbed from 7.0K to
+  11.2K of 12K, so the next step always crossed the budget. Without the floor rule
+  nothing stopped it.
+- Rep 0 didn't get there (6 compactions in 24 steps): the accretion depends on how
+  many compactions a run needs, which is why one rep looked fine.
+
+The revert was right, but I called it before reading the rows (rep 0 looked normal),
+then over-corrected before reading the trace. The order should have been: rows,
+trace, diagnosis.
 
 S6 follow-ups:
 1. (done) long-refactor's goal now says the legacy names go too ("no shims, aliases or
@@ -1022,9 +1032,13 @@ S6 follow-ups:
    summaries at 95% of the budget compact once, not 5 times). long-refactor's budget
    is now 20K, which its working set fits. (done: s6-cal2 above; 0 requests over
    budget, 6/6 passed.)
-   - Open: s6-cal long-refactor rep 1's trace, to tell a thrash from a stall. If it is
-     a stall (a non-streaming compaction call hanging), compaction needs its own
-     timeout.
+   - (done) s6-cal long-refactor rep 1's trace: a thrash, not a stall (15
+     compactions, 734s of 900s; see "s6-cal" above).
+   - Open, not blocking: summaries of summaries accrete (2.5K → 6.6K output tokens
+     over 15 compactions). The floor rule stops the thrash, but a long enough run
+     still creeps toward the budget. Candidate fixes: tell the summarizer to compress
+     what an earlier summary said more than new steps, or cap the summary's length.
+     Measure on a task that needs 10+ compactions before choosing.
 3. Optional: a cost lever. Compaction at effort `low` vs `high` on the long-* tasks
    (output is the biggest item, and the summarizer thinks at the conversation's
    effort). No kept turns, so the kept-thinking constraint doesn't apply.
@@ -1049,10 +1063,9 @@ what it costs in context, cache and money.
    Context on at the 120K default changed nothing measurable on them: peak request
    median 7.0K (max 14.1K), no results cut, no compaction. This is the baseline S7's
    regressions are measured against.
-2. **s6-cal long-refactor rep 1's trace** (on the VM). Still open: the pushed
-   `s6-cal/s6-context-curves.txt` was empty (the script found no matching trace and
-   printed its message to stderr), so it was removed. It decides whether compaction
-   needs its own timeout. It doesn't block S7.
+2. (done) **s6-cal long-refactor rep 1's trace**: F2 thrashed (15 compactions, 734s
+   of the 900s timeout in compaction, summaries growing 2.5K → 6.6K). No call stalled,
+   so compaction needs no timeout of its own.
 3. **Compaction effort A/B**: deferred until after S7. It's an optional cost lever, and
    S7 is the last stage still unbuilt.
 
@@ -1397,8 +1410,11 @@ out per service so the parent's context stays small.
   make a compactor oscillate when the summary sits near the budget, which a unit test
   shows. And the budget was smaller than the task's working set, so no rule could
   keep it under. After the fixes and a 20K budget: 0 of 125 requests over budget.
-  I also over-claimed once: I blamed a costly run on the removed rule before reading
-  its rows, and the rows didn't back it. Read the data before the diagnosis.
+  The removed rule did thrash: in one trial, 15 compactions, 734s of a 900s timeout,
+  every step from 16 on. The cause was summaries of summaries accreting, 2.5K → 6.6K
+  tokens, until the post-compaction request sat at 93% of the budget. But I called it
+  before I had that trace, and the first rows I read (a rep that didn't thrash)
+  seemed to contradict me. Rows, then trace, then diagnosis.
 - **Finance angle:** an incident-triage agent reads logs far bigger than any context
   window. Here a 200K-line gateway log is the test bed. The skills are narrowing the
   query, paging what was cut, and keeping exact identifiers (timestamps, counts)
