@@ -1,0 +1,22 @@
+# S7 subagents: eight service logs in four formats, one investigation each, so the work
+# fans out. Five services had an incident in a cascading outage; three have decoys
+# (stack traces that repeat ERROR, a slow burn under the threshold, a WARN burst that
+# says "error"). The A/B: delegation vs one context (compaction on in both arms).
+# Traps: setup.py. Answers: make_answers.py.
+goal = """
+On 2024-03-15 several of our trading services had trouble. Their logs are in logs/,
+one file per service (the file name is the service name), and each service logs in its
+own format. Timestamps are UTC unless they carry an offset; the syslog-style files have
+no year, and it is 2024.
+
+A service had an incident if some ERROR-level entry is followed, within 60 seconds of
+it (inclusive), by at least 19 more ERROR-level entries: 20 or more in that window,
+counting the first. The incident starts at the earliest such entry.
+
+For each service that had an incident, find when it started (UTC, to the second) and
+the error code of that first entry. Write incidents.json as
+{"<service>": {"start": "YYYY-MM-DDTHH:MM:SSZ", "code": "<code>"}, ...} with only the
+services that had an incident. Do not modify the logs.
+"""
+tags = ["subagents", "logs", "analysis", "finance", "positive"]
+max_steps = 35

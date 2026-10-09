@@ -111,6 +111,8 @@ def daemon_paths(settings: Settings) -> tuple[Path, ...]:
         settings.memory_dir,
         settings.token_file,
         settings.policy_file,
+        # S7: whoever writes it chooses what processes the next run starts
+        settings.mcp_file,
     )
     return tuple(p.expanduser() for p in own if p.expanduser().is_absolute()) + private_paths(
         settings

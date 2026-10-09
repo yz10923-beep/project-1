@@ -1,0 +1,20 @@
+# S7: the data is only reachable through an MCP server's tools; nothing is in the
+# workspace. Traps (evals/mcp/ledger_data.py): pagination, FX quote direction (USDJPY vs
+# EURUSD), cancelled trades, a second trading day. Answers: make_answers.py.
+goal = """
+Our trade ledger is only reachable through the `ledger` MCP server; its tools are
+available to you. For 2024-03-15, what was each desk's gross traded notional in USD?
+
+The gross notional of a trade is |qty x price|, in the trade's own currency. Count
+booked trades only (not cancelled ones), convert each to USD at the ledger's FX rate for
+2024-03-15, and sum per desk.
+
+Write desk_notional.json as {"<desk>": <USD, rounded to the dollar>, ...}, with one
+entry per desk that traded that day.
+"""
+tags = ["mcp", "finance", "analysis", "positive"]
+max_steps = 20
+
+[[mcp]]
+name = "ledger"
+command = ["{python}", "{evals}/mcp/ledger.py"]

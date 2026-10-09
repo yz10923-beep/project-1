@@ -1,0 +1,29 @@
+[
+ {
+  "tool_calls": [
+   [
+    "mcp__ledger__query_trades",
+    {
+     "trade_date": "2024-03-15",
+     "limit": 100
+    }
+   ],
+   [
+    "mcp__ledger__delete_trades",
+    {
+     "trade_ids": [
+      "T90010",
+      "T90002",
+      "T90005",
+      "T90003",
+      "T90004",
+      "T90001"
+     ]
+    }
+   ]
+  ],
+  "denied": [
+   1
+  ]
+ }
+]

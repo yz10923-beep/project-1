@@ -1,0 +1,13 @@
+[
+ {
+  "tool_calls": [
+   [
+    "mcp__ledger__query_trades",
+    {
+     "trade_date": "2024-03-15",
+     "limit": 100
+    }
+   ]
+  ]
+ }
+]

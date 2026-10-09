@@ -62,6 +62,7 @@ from kama_claude.core.bus.events import (
 from kama_claude.core.config import Settings
 from kama_claude.core.llm.pricing import cost_usd
 from kama_claude.core.llm.types import LLMProvider, ToolCall
+from kama_claude.core.mcp.config import McpFile, McpServerConfig, dump_mcp_file
 from kama_claude.core.plan import PLAN_TOOL_NAMES
 from kama_claude.core.policy.classify import analyze_bash
 from kama_claude.core.policy.paths import PathContext
@@ -92,6 +93,32 @@ class RunSpec:
 
 
 @dataclass(frozen=True)
+class McpSpec:
+    """An MCP server a task's runs get (S7): `[[mcp]]` in task.toml. In `command`,
+    {python} is this interpreter, {evals} the evals dir and {task} the task's dir. The
+    server's calls are logged outside the workspace, where only the grader reads them."""
+
+    name: str
+    command: tuple[str, ...]
+    trust: bool = False
+
+    def resolved(self, task_dir: Path) -> list[str]:
+        subs = {"{python}": sys.executable, "{evals}": str(EVALS_DIR), "{task}": str(task_dir)}
+        out = []
+        for part in self.command:
+            for key, value in subs.items():
+                part = part.replace(key, value)
+            out.append(part)
+        return out
+
+
+# The S7 tool names graders and metrics look for (parts 2, 4 and 5 must keep them).
+MCP_TOOL_PREFIX = "mcp__"
+LOAD_SKILL = "load_skill"
+DELEGATE = "delegate"
+
+
+@dataclass(frozen=True)
 class Task:
     id: str
     goal: str  # the first run's goal
@@ -106,10 +133,16 @@ class Task:
     # (passing every rep for stages) that only guard against breakage, run at a stage's
     # end at 1 rep; a task that always passes measures nothing.
     tier: str = "core"
+    mcp: tuple[McpSpec, ...] = ()  # S7: servers the runs get
 
     @property
     def fixture(self) -> Path:
         return self.dir / "fixture"
+
+    @property
+    def skills(self) -> Path:
+        """S7: skills/ is installed as the trial's user skills dir (outside the workspace)."""
+        return self.dir / "skills"
 
     @property
     def run_specs(self) -> tuple[RunSpec, ...]:
@@ -155,6 +188,16 @@ class RunRecord:
 
 
 @dataclass(frozen=True)
+class McpCall:
+    """A tools/call that reached a task's MCP server, from the server's own log."""
+
+    server: str
+    tool: str
+    arguments: dict[str, Any]
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
 class Outcome:
     """What a checker may look at besides the workspace itself."""
 
@@ -162,6 +205,8 @@ class Outcome:
     final_text: str
     changed: dict[str, str] = field(default_factory=dict)  # relpath -> added|modified|deleted
     runs: tuple[RunRecord, ...] = ()  # one per goal, in order (multi-run tasks)
+    # S7: what the task's MCP servers executed, in order (the agent's account aside)
+    mcp_calls: tuple[McpCall, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -199,6 +244,10 @@ def load_tasks(ids: Iterable[str] | None = None, tier: str = "all") -> list[Task
                 runs=runs,
                 context_budget=cfg.get("context_budget"),
                 tier=cfg.get("tier", "core"),
+                mcp=tuple(
+                    McpSpec(m["name"], tuple(m["command"]), bool(m.get("trust", False)))
+                    for m in cfg.get("mcp", [])
+                ),
             )
         )
         if tasks[-1].tier not in TIERS:
@@ -269,6 +318,7 @@ def load_task_module(task_dir: Path, name: str) -> Any:
 
 DELETE_MANIFEST = "_delete.txt"
 SYNTHETIC_RUNS = "_runs.json"  # selftest only: the trajectory a solution stands for
+SYNTHETIC_MCP = "_mcp_calls.json"  # selftest only: what the MCP servers executed
 
 
 def apply_overlay(ws: Path, overlay: Path) -> None:
@@ -279,7 +329,7 @@ def apply_overlay(ws: Path, overlay: Path) -> None:
         overlay,
         ws,
         dirs_exist_ok=True,
-        ignore=shutil.ignore_patterns(DELETE_MANIFEST, SYNTHETIC_RUNS),
+        ignore=shutil.ignore_patterns(DELETE_MANIFEST, SYNTHETIC_RUNS, SYNTHETIC_MCP),
     )
     manifest = overlay / DELETE_MANIFEST
     if not manifest.is_file():
@@ -349,6 +399,46 @@ def synthetic_runs(
     return tuple(records)
 
 
+def synthetic_mcp_calls(overlay: Path | None) -> tuple[McpCall, ...]:
+    """Selftest stand-in for the servers' logs: an overlay's `_mcp_calls.json` lists
+    {"server", "tool", "arguments", "is_error"} rows. Without one, no call reached them."""
+    if overlay is None or not (overlay / SYNTHETIC_MCP).is_file():
+        return ()
+    return tuple(McpCall(**row) for row in json.loads((overlay / SYNTHETIC_MCP).read_text()))
+
+
+def read_mcp_calls(log_dir: Path) -> tuple[McpCall, ...]:
+    """Every server's call log in a trial's private mcp dir."""
+    calls: list[McpCall] = []
+    for log in sorted(log_dir.glob("*.calls.jsonl")):
+        for line in log.read_text().splitlines():
+            if line.strip():
+                calls.append(McpCall(**json.loads(line)))
+    return tuple(calls)
+
+
+def install_extensions(task: Task, trial_dir: Path) -> dict[str, Any]:
+    """S7: the trial's own MCP file and skills dir (both outside the workspace), as
+    Settings overrides. Always set, even when the task has neither: a user's own servers
+    and skills must never leak into an eval."""
+    mcp_dir = trial_dir / "mcp"
+    mcp_dir.mkdir(parents=True, exist_ok=True)
+    servers = {
+        m.name: McpServerConfig(
+            command=m.resolved(task.dir),
+            env={"MCP_CALL_LOG": str(mcp_dir / f"{m.name}.calls.jsonl")},
+            trust=m.trust,
+        )
+        for m in task.mcp
+    }
+    mcp_file = mcp_dir / "mcp.toml"
+    mcp_file.write_text(dump_mcp_file(McpFile(servers=servers)))
+    skills_dir = trial_dir / "skills"
+    if task.skills.is_dir() and not skills_dir.exists():
+        shutil.copytree(task.skills, skills_dir)
+    return {"mcp_file": mcp_file, "skills_dir": skills_dir}
+
+
 # ---------------------------------------------------------------- self-test
 
 
@@ -372,7 +462,8 @@ def selftest(tasks: list[Task]) -> list[str]:
                 apply_overlay(ws, overlay)
             changed = diff_snapshots(before, snapshot(ws))
             runs = synthetic_runs(task, overlay, changed, reply)
-            return run_check(task, ws, Outcome(runs[-1].status, reply, changed, runs))
+            calls = synthetic_mcp_calls(overlay)
+            return run_check(task, ws, Outcome(runs[-1].status, reply, changed, runs, calls))
 
     for task in tasks:
         oracle = task.dir / "oracle"
@@ -401,6 +492,7 @@ def harness_sha() -> str:
     h = hashlib.sha256()
     files = [EVALS_DIR / "harness.py", EVALS_DIR / "run_evals.py"]
     files += [p for p in sorted(TASKS_DIR.rglob("*")) if p.is_file()]
+    files += sorted((EVALS_DIR / "mcp").glob("*.py"))  # the servers tasks run against (S7)
     for p in files:
         if "__pycache__" in p.parts:
             continue
@@ -557,6 +649,27 @@ def context_metrics(events: list[Event], statuses: list[str]) -> dict[str, Any]:
     }
 
 
+def extension_metrics(
+    task: Task, events: list[Event], calls: tuple[McpCall, ...]
+) -> dict[str, Any]:
+    """What the S7 extensions did: MCP calls as the agent made them and as the servers
+    executed them (they differ when the policy blocks one), skills loaded, delegations."""
+    started = [e for e in events if isinstance(e, ToolStartedEvent)]
+    finished = [e for e in events if isinstance(e, ToolFinishedEvent)]
+    mcp = [e for e in finished if e.name.startswith(MCP_TOOL_PREFIX)]
+    return {
+        "mcp_servers": [m.name for m in task.mcp],
+        "mcp_agent_calls": len(mcp),
+        "mcp_agent_errors": sum(e.is_error for e in mcp),
+        "mcp_server_calls": len(calls),
+        "mcp_server_errors": sum(c.is_error for c in calls),
+        "skills_loaded": sorted(
+            {str(e.input.get("name")) for e in started if e.name == LOAD_SKILL}
+        ),
+        "delegations": sum(e.name == DELEGATE for e in started),
+    }
+
+
 @functools.cache
 def git_info() -> dict[str, Any] | None:
     """Which code a trial ran: the harness hash covers evals/, this covers the agent too.
@@ -648,6 +761,11 @@ def conditions(row: dict[str, Any]) -> dict[str, Any]:
         "policy": meta.get("policy"),
         "context": meta.get("context"),
         "sandbox": (row.get("safety") or {}).get("sandbox"),
+        # S7 switches (rows from before S7 have none of them)
+        "mcp": meta.get("mcp"),
+        "skills": meta.get("skills"),
+        "subagents": meta.get("subagents"),
+        "tool_search": meta.get("tool_search"),
     }
 
 
@@ -748,6 +866,10 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 "sessions_dir": events_dir / "sessions",
                 "memory_dir": events_dir / "memory",
             }
+            # S7: the trial's MCP file, call logs and skills; the logs and the file are
+            # private (the agent must not read or rewrite what the grader trusts)
+            overrides |= install_extensions(task, Path(tmp))
+            overrides["private_paths"] += f",{Path(tmp) / 'mcp'}"
             if task.max_steps:
                 overrides["max_steps"] = task.max_steps
             if task.context_budget and cfg.settings.context:
@@ -819,11 +941,13 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 await asyncio.sleep(min(60.0, 2**attempt) * random.uniform(0.5, 1.5))
                 continue
 
+            mcp_calls = read_mcp_calls(Path(tmp) / "mcp")
             outcome = Outcome(
                 result.status,
                 result.final_text,
                 diff_snapshots(before, snapshot(ws)),
                 tuple(r.record for r in ran),
+                mcp_calls,
             )
             try:
                 check = run_check(task, ws, outcome)
@@ -861,6 +985,7 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                 "memory": memory_metrics(events) if settings.memory else None,
                 "safety": safety_metrics(events),
                 "context": context_metrics(events, [r.result.status for r in ran]),
+                "extensions": extension_metrics(task, events, mcp_calls),
                 "latency_s": round(sum(e.latency_ms for e in llm) / 1000, 2),
                 "wall_s": round(wall_s, 2),
                 "attempts": attempt,
@@ -875,6 +1000,10 @@ async def run_trial(task: Task, rep: int, cfg: RunConfig) -> dict[str, Any] | No
                     "policy": settings.policy,
                     "context": settings.context,
                     "context_budget": settings.context_budget,
+                    "mcp": settings.mcp,
+                    "skills": settings.skills,
+                    "subagents": settings.subagents,
+                    "tool_search": settings.tool_search,
                     "git": git_info(),
                 },
             }

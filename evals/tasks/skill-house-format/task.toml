@@ -1,0 +1,11 @@
+# S7 skills: the desk's house format for its risk report lives in a user skill
+# (skills/desk-risk-report, installed outside the workspace as the trial's skills dir),
+# not in the goal. Without loading it the report can't be right; with it, the parts show
+# which rules survive. skills/release-notes is a distractor that should not be loaded.
+# Answers: make_answers.py.
+goal = """
+Prepare this week's desk risk report from positions.csv, limits.csv and var.csv, the
+usual way. It goes to the risk committee.
+"""
+tags = ["skills", "finance", "report", "positive"]
+max_steps = 20

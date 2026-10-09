@@ -67,6 +67,14 @@ class Settings(BaseModel):
     context: bool = True
     context_budget: int = Field(default=120_000, ge=10_000)
     tool_result_max_chars: int = Field(default=30_000, ge=2_000)
+    # S7: extensions. Each switch, off, removes one thing from the request, so an A/B
+    # changes one thing; all four off = the S6 agent, byte for byte.
+    mcp: bool = True  # tools from the MCP servers in mcp_file
+    mcp_file: Path = Path("~/.kama/mcp.toml")
+    skills: bool = True  # the skill index and load_skill (skills_dir + workspace .kama/skills)
+    skills_dir: Path = Path("~/.kama/skills")
+    subagents: bool = True  # delegate: child runs with their own context
+    tool_search: bool = False  # MCP tools deferred behind tool search (measured, not default)
     anthropic_api_key: SecretStr | None = None
 
     # daemon: auth token file (mode 0600), and how long a run waits for a human approval

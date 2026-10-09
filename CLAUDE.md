@@ -62,7 +62,7 @@ talking JSON-RPC 2.0 over NDJSON/TCP.
 
 The reference repo has `stage/s0` … `stage/s7` branches. Use them to compare designs
 after building a stage, not as a source to copy. Stage plan, done-criteria and what
-each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups done and measured (s6-cal2: 0 of 125 requests over budget, 6/6 vs 3/3 passed; long-refactor at 20K costs 1.8x off); S6 closed: regression sweep 13/13 ($1.60); s6-cal rep1 trace confirmed the F2 thrash (15 compactions, summaries accreting 2.5K→6.6K); open, not blocking: summary accretion, compaction-effort A/B (deferred past S7) → S7 planned (`docs/ROADMAP.md` "S7 plan": MCP client, tool manifest, subagents, skills in 5 parts; next: S7 (1/5) evals first)**.
+each stage should teach: `docs/ROADMAP.md`. Current stage: **S5 done (A/B run, follow-up fix confirmed) → S6 built and measured (A/B 50/51 both arms; compaction +43% cost at test budgets, 0 attributable quality loss in 6); S6 follow-ups done and measured (s6-cal2: 0 of 125 requests over budget, 6/6 vs 3/3 passed; long-refactor at 20K costs 1.8x off); S6 closed: regression sweep 13/13 ($1.60); s6-cal rep1 trace confirmed the F2 thrash (15 compactions, summaries accreting 2.5K→6.6K); open, not blocking: summary accretion, compaction-effort A/B (deferred past S7) → S7 (1/5) done: 4 eval tasks (MCP ledger, hostile server, skill format, subagent fan-out), MCP server kit checked against the official SDK, harness MCP/skills plumbing, switches; next: S7 (2/5) MCP client and policy**.
 No stage is timeboxed or cut: build the fullest version of each.
 
 ### Commands
@@ -117,7 +117,10 @@ false = the S4 approvals: ask for bash/write_file, -y approves all), `KAMA_POLIC
 (credential-looking env vars to keep for bash), `KAMA_PRIVATE_PATHS` (more paths no tool may
 touch), `KAMA_LLM_MAX_RETRIES` (4), `KAMA_LLM_RETRY_BUDGET_S` (120), `KAMA_CONTEXT` (true; false = the
 S5 agent, for A/B runs), `KAMA_CONTEXT_BUDGET` (120000 tokens), `KAMA_TOOL_RESULT_MAX_CHARS`
-(30000) (S6: over the budget the history is compacted server-side, for models that support it).
+(30000) (S6: over the budget the history is compacted server-side, for models that support it),
+`KAMA_MCP` (true), `KAMA_MCP_FILE` (`~/.kama/mcp.toml`), `KAMA_SKILLS` (true), `KAMA_SKILLS_DIR`
+(`~/.kama/skills`), `KAMA_SUBAGENTS` (true), `KAMA_TOOL_SEARCH` (false) (S7; each one off removes
+one extension from the request, all four off = the S6 agent).
 
 ### Layout
 
@@ -141,6 +144,7 @@ src/kama_claude/
     policy/paths.py      where a path points: inside, protected, outside, secret, scratch
     policy/engine.py     Policy: modes, rule files (user allows, workspace only tightens), Decision
     sandbox.py           bwrap / unshare / none, probed for real; bash argv; scrubbed env
+    mcp/config.py        mcp.toml: McpServerConfig (stdio | http), load/dump (S7)
     context.py           ContextMeter: request sizes exact from usage, the unsent tail estimated,
                          an exact count_tokens near the budget; Compactor; the summary
                          instructions (S6)
@@ -169,12 +173,15 @@ src/kama_claude/
   tui/state.py           RunView: pure fold of a run's events (dedupe, cost, plan, approvals)
   tui/app.py             Textual app: log, plan panel, approvals, steering, runs, trace, reconnect
 scripts/fake_api.py      fake streaming Messages API with realistic timing (offline smoke tests)
+scripts/fake_mcp.py      misbehaving MCP server (crash, slow, big, image, list_changed, drift)
 tests/fakes.py           ScriptedProvider (streams its text), GatedProvider, PausingProvider
 tests/unit/              protocol, config, server, tools, loop, plan, provider (mock SSE), daemon,
                          CLI, TUI (Textual Pilot against an in-process kama-core)
 tests/integration/       real daemon + CLI subprocesses (+ the TUI and sessions via the fake API)
 tests/live/              real API; deselected by default
 evals/harness.py         trial runner: fresh workspace, end-state grading, results/errors/traces
+evals/mcp/               S7: kit.py (strict MCP server, stdio + HTTP, checked against the official
+                         SDK client), ledger.py + ledger_data.py (seeded; --hostile variant)
 evals/policy_eval.py     the policy corpus (evals/policy/corpus.toml): 0 dangerous allows, gaps listed
 evals/run_evals.py       CLI: list / selftest / run / summary; harness-approval gate
 evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ + wrong/*/ + [alt/*/]
@@ -182,7 +189,9 @@ evals/tasks/<id>/        task.toml + fixture/ + [setup.py] + check.py + oracle/ 
                          risk-report-spec grades 10 requirements separately, wrong/ from make_answers.py;
                          multi-run tasks: [[runs]] + setup.py between() + _runs.json in solutions;
                          S6 tasks set `context_budget`; long-refactor's fixture is make_fixture.py's;
-                         `tier = "regression"` = saturated, run at a stage's end at 1 rep)
+                         `tier = "regression"` = saturated, run at a stage's end at 1 rep;
+                         S7: `[[mcp]]` servers whose call logs reach check.py as
+                         outcome.mcp_calls (`_mcp_calls.json` in solutions); `skills/`)
 evals/results/kama-run/<variant>/  results.jsonl, errors.jsonl (traces/, events/ git-ignored)
 ```
 

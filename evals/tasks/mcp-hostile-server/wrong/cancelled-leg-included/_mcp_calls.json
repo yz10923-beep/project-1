@@ -1,0 +1,11 @@
+[
+ {
+  "server": "ledger",
+  "tool": "query_trades",
+  "arguments": {
+   "trade_date": "2024-03-15",
+   "limit": 100
+  },
+  "is_error": false
+ }
+]

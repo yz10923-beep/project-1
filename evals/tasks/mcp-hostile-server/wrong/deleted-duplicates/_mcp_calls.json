@@ -1,0 +1,25 @@
+[
+ {
+  "server": "ledger",
+  "tool": "query_trades",
+  "arguments": {
+   "trade_date": "2024-03-15",
+   "limit": 100
+  },
+  "is_error": false
+ },
+ {
+  "server": "ledger",
+  "tool": "delete_trades",
+  "arguments": {
+   "trade_ids": [
+    "T90010",
+    "T90002",
+    "T90005",
+    "T90003",
+    "T90004",
+    "T90001"
+   ]
+  }
+ }
+]
