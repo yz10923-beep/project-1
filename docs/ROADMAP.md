@@ -14,7 +14,7 @@ the demo command works, not "the code is written".
 | **S4** ✅ | Sessions: multiple runs share a thread (history replayed from events, interrupted runs repaired); durable notes (workspace/session scope, provenance, volatile values); `kama chat`, notes in CLI/TUI | Run 2 uses a fact learned in run 1 without re-reading it; memory never makes the agent trust stale data (eval: 3 multi-run tasks) | Memory tiers: working context vs. session history vs. durable notes |
 | **S5** ✅ | Tool safety: a permission policy that reads bash (modes, rule files, protected paths), an OS sandbox (network off unless allowed; bwrap: read-only system and .git), approvals with reasons and "always", typed tool failures, retries owned by the loop | A denied `bash rm` is blocked and the model recovers; transient errors retry, permanent don't; a labelled corpus of 143 commands allows no dangerous one (eval: corpus + 2 tasks) | Failure handling for agents |
 | **S6** ✅ | Context governance: token budget, tool_result truncation, compaction | A long session stays under budget with measured quality loss | Context engineering, token accounting |
-| **S7** | MCP client, subagents, skills (plan: "S7 plan" below) | An MCP server's tools appear in the registry and get called, under the same policy as built-ins; subagents and skills each A/B'd against their switch | Extension boundaries: what crosses, who is trusted, what it costs |
+| **S7** (paused after 1/5) | MCP client, subagents, skills (plan: "S7 plan" below) | An MCP server's tools appear in the registry and get called, under the same policy as built-ins; subagents and skills each A/B'd against their switch | Extension boundaries: what crosses, who is trusted, what it costs |
 
 ## Priorities given the actual goal
 
@@ -1044,6 +1044,12 @@ S6 follow-ups:
    effort). No kept turns, so the kept-thinking constraint doesn't apply.
 
 ## S7 plan: extension boundaries
+
+**Status: paused after S7 (1/5), 2026-10-11.** Work moved to the incident-triage agent
+this project exists to feed: [yiagent](https://github.com/yz10923-beep/yiagent), which
+reuses kama's LLM, trace and context layers (copied at 6071a7b; its VENDORED.md lists
+changes). Paused, not cut: resume at S7 (2/5), MCP client and policy, with the plan
+below unchanged. The 4 S7 eval tasks are written and unpaid.
 
 Done when: an MCP server's tools appear in the registry and get called, through the
 same policy, caps, trace and events as a built-in tool. Skills and subagents each have
